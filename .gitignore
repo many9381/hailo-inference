@@ -1,0 +1,65 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+_deps/
+compile_commands.json
+
+# Qt
+*.moc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+.qmake.cache
+.qmake.stash
+*.pro.user
+*.pro.user.*
+
+# Object & binary files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# Hailo
+hailort.log
+*.hef.tmp
+
+# Output artifacts
+output/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/
+CLAUDE.md
+
+# Logs
+*.log
+
+
+# Resource artifacts
+resource/*
+!resource/.gitkeep
