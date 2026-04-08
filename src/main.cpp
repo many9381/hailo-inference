@@ -16,17 +16,20 @@
 namespace fs = std::filesystem;
 
 int hailo_inference(const std::string& hef_path, const std::string& images_dir, const std::string& output_dir) {
+    // 결과 저장 디렉토리가 없으면 생성(존재하면 무시).
     fs::create_directories(output_dir);
 
-    // 이미지 목록 수집
+    // 이미지 목록 수집: 입력 디렉토리에서 지원 확장자만 필터링.
     std::vector<std::string> image_paths;
     for (auto& entry : fs::directory_iterator(images_dir)) {
         auto ext = entry.path().extension().string();
+        // 대소문자 무관 비교를 위해 소문자로 정규화.
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
             image_paths.push_back(entry.path().string());
         }
     }
+    // 결정적인 처리 순서를 위해 파일명 기준 정렬.
     std::sort(image_paths.begin(), image_paths.end());
 
     if (image_paths.empty()) {
@@ -89,7 +92,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // argv[1..3]는 위치 기반 필수 인자.
     std::string hef_path = argv[1];
+    // images_dir / output_dir은 hailo_inference() 배치 경로용. 현재 main 흐름은 GUI만 사용.
     [[maybe_unused]] std::string images_dir = argv[2];
     [[maybe_unused]] std::string output_dir = argv[3];
 
@@ -98,11 +103,13 @@ int main(int argc, char* argv[]) {
     if (argc >= 5) {
         video_path = argv[4];
     } else {
+        // 실행 파일이 build/ 안에 있다고 가정하고 한 단계 위를 project_root로 본다.
         fs::path exe_dir = fs::path(argv[0]).parent_path();
         fs::path project_root = exe_dir.parent_path();
         video_path = (project_root / "resource" / "VIRAT_S_000001.mp4").string();
     }
 
+    // QApplication 부트스트랩 후 메인 윈도우 띄우기.
     GuiApp gui_app(argc, argv);
 
     return gui_app.run(hef_path, video_path);
