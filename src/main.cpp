@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    [[maybe_unused]] std::string hef_path = argv[1];
+    std::string hef_path = argv[1];
     [[maybe_unused]] std::string images_dir = argv[2];
     [[maybe_unused]] std::string output_dir = argv[3];
 
@@ -103,5 +103,7 @@ int main(int argc, char* argv[]) {
         video_path = (project_root / "resource" / "VIRAT_S_000001.mp4").string();
     }
 
-    return GuiApp::run(argc, argv, video_path);
+    GuiApp gui_app(argc, argv);
+
+    return gui_app.run(hef_path, video_path);
 }

@@ -6,11 +6,18 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <iostream>
+#include <utility>
+
+#include "HailoInference.h"
+#include "PostProcessor.h"
+#include "Preprocessor.h"
+#include "Visualizer.h"
 #include "gstreamer/VideoPipeline.h"
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle("Hailo Inference GUI");
-    resize(960, 720);
+MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWindow(parent) {
+    this->setWindowTitle("Hailo Inference GUI");
+    this->resize(960, 720);
 
     // this가 부모 → MainWindow 소멸 시 자동 delete
     this->central_ = new QWidget(this);
@@ -25,7 +32,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     this->videoLabel_->setText("No video");
     this->layout_->addWidget(this->videoLabel_);
 
-    setCentralWidget(this->central_);
+    this->setCentralWidget(this->central_);
+
+    // HailoRT 추론 엔진 초기화. 실패 시 추론 없이 영상만 표시한다.
+    try {
+        this->inference_ = std::make_unique<HailoInference>(hef_path);
+        std::cout << "HailoInference 초기화 완료: " << hef_path << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "HailoInference 초기화 실패 (" << hef_path << "): " << e.what() << std::endl;
+        this->inference_.reset();
+    }
+
+    // 추론 엔진이 준비된 경우에만 워커 스레드를 가동.
+    if (this->inference_) {
+        this->worker_ = std::thread(&MainWindow::inferenceLoop, this);
+    }
 
     // this가 부모 → MainWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
     this->pipeline_ = new VideoPipeline(this);
@@ -33,7 +54,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             this, &MainWindow::onFrameReady);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    // 더 이상 새 프레임이 들어오지 않도록 파이프라인을 먼저 정지.
+    if (this->pipeline_) {
+        this->pipeline_->stop();
+    }
+    // 워커 스레드 종료 신호 후 join.
+    {
+        std::lock_guard<std::mutex> lock(this->mu_);
+        this->stopWorker_ = true;
+    }
+    this->cond_.notify_all();
+    if (this->worker_.joinable()) {
+        this->worker_.join();
+    }
+}
 
 void MainWindow::playVideo(const QString& filepath) {
     if (!this->pipeline_->start(filepath.toStdString())) {
@@ -41,9 +76,85 @@ void MainWindow::playVideo(const QString& filepath) {
     }
 }
 
+void MainWindow::inferenceLoop() {
+    while (true) {
+        cv::Mat frame;
+        {
+            std::unique_lock<std::mutex> lock(this->mu_);
+            this->cond_.wait(lock, [this] { return this->hasPending_ || this->stopWorker_; });
+            if (this->stopWorker_) {
+                return;
+            }
+            frame = std::move(this->pendingFrame_);
+            this->hasPending_ = false;
+        }
+
+        this->busy_.store(true, std::memory_order_release);
+
+        try {
+            // hailo_inference()와 동일한 파이프라인: letterbox → BGR2RGB → 추론 → NMS
+            LetterboxInfo lb_info;
+            cv::Mat input_img = Preprocessor::letterbox(frame, INPUT_W, INPUT_H, lb_info);
+            cv::cvtColor(input_img, input_img, cv::COLOR_BGR2RGB);
+            if (!input_img.isContinuous()) {
+                input_img = input_img.clone();
+            }
+
+            auto outputs = this->inference_->run(input_img);
+            auto detections = PostProcessor::decode(outputs, CONF_THRESHOLD);
+
+            // 결과 게시 — GUI 스레드는 다음 프레임 그릴 때 이 값을 사용한다.
+            {
+                std::lock_guard<std::mutex> lock(this->mu_);
+                this->latestDets_ = std::move(detections);
+                this->latestLb_ = lb_info;
+                this->hasResult_ = true;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "프레임 추론 실패: " << e.what() << std::endl;
+        }
+
+        this->busy_.store(false, std::memory_order_release);
+    }
+}
+
 void MainWindow::onFrameReady(const QImage& image) {
-    // 라벨 크기에 맞춰 비율 유지하며 스케일링
-    QPixmap pixmap = QPixmap::fromImage(image);
+    // QImage(RGB888) → cv::Mat(BGR) 변환. cvtColor가 새 버퍼를 할당하므로
+    // 결과 bgr Mat은 QImage 수명과 독립적이다 (cv::Mat refcount로 관리됨).
+    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
+    cv::Mat rgbMat(rgb.height(), rgb.width(), CV_8UC3,
+                   const_cast<uchar*>(rgb.bits()), rgb.bytesPerLine());
+    cv::Mat bgr;
+    cv::cvtColor(rgbMat, bgr, cv::COLOR_RGB2BGR);
+
+    // 워커가 idle이면 새 프레임을 dispatch. busy면 건너뛴다.
+    if (this->inference_ && !this->busy_.load(std::memory_order_acquire)) {
+        {
+            std::lock_guard<std::mutex> lock(this->mu_);
+            this->pendingFrame_ = bgr;  // cv::Mat은 refcount 공유 — clone 불필요
+            this->hasPending_ = true;
+        }
+        this->cond_.notify_one();
+    }
+
+    // 가장 최근 추론 결과를 현재 프레임 위에 그려 표시한다.
+    // (워커가 추론 중이면 직전 프레임의 결과가 그려지므로 1~2프레임 지연될 수 있다.)
+    cv::Mat displayBgr;
+    {
+        std::lock_guard<std::mutex> lock(this->mu_);
+        if (this->hasResult_) {
+            displayBgr = Visualizer::draw(bgr, this->latestDets_, this->latestLb_);
+        } else {
+            displayBgr = bgr;
+        }
+    }
+
+    // BGR → RGB → QImage. 외부 버퍼 참조이므로 .copy()로 분리해야 한다.
+    cv::Mat displayRgb;
+    cv::cvtColor(displayBgr, displayRgb, cv::COLOR_BGR2RGB);
+    QImage out(displayRgb.data, displayRgb.cols, displayRgb.rows,
+               static_cast<int>(displayRgb.step), QImage::Format_RGB888);
+    QPixmap pixmap = QPixmap::fromImage(out.copy());
     this->videoLabel_->setPixmap(pixmap.scaled(this->videoLabel_->size(),
                                                Qt::KeepAspectRatio,
                                                Qt::SmoothTransformation));
