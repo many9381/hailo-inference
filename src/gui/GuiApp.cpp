@@ -1,23 +1,18 @@
 #include "GuiApp.h"
 
-#include <QApplication>
 #include <QString>
 
 #include "MainWindow.h"
 
-namespace GuiApp {
+GuiApp::GuiApp(int& argc, char** argv) : app_(argc, argv) {}
 
-int run(int argc, char* argv[], const std::string& video_path) {
-    QApplication app(argc, argv);
-
-    MainWindow window;
+int GuiApp::run(const std::string& hef_path, const std::string& video_path) {
+    MainWindow window(hef_path);
     window.show();
 
     if (!video_path.empty()) {
         window.playVideo(QString::fromStdString(video_path));
     }
 
-    return app.exec();
+    return this->app_.exec();
 }
-
-} // namespace GuiApp

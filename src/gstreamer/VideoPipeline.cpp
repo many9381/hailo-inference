@@ -9,11 +9,11 @@ VideoPipeline::VideoPipeline(QObject* parent) : QObject(parent) {
 }
 
 VideoPipeline::~VideoPipeline() {
-    stop();
+    this->stop();
 }
 
 bool VideoPipeline::start(const std::string& filepath) {
-    stop();
+    this->stop();
 
     // filesrc → decodebin → videoconvert → RGB → appsink
     const std::string desc =
@@ -33,7 +33,7 @@ bool VideoPipeline::start(const std::string& filepath) {
     this->appsink_ = gst_bin_get_by_name(GST_BIN(this->pipeline_), "sink");
     if (!this->appsink_) {
         qWarning() << "appsink 요소를 찾을 수 없음";
-        stop();
+        this->stop();
         return false;
     }
 
@@ -44,7 +44,7 @@ bool VideoPipeline::start(const std::string& filepath) {
     GstStateChangeReturn ret = gst_element_set_state(this->pipeline_, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         qWarning() << "파이프라인 PLAYING 전환 실패";
-        stop();
+        this->stop();
         return false;
     }
 
