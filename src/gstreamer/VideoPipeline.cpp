@@ -71,6 +71,9 @@ bool VideoPipeline::start(const std::string& filepath) {
 }
 
 void VideoPipeline::stop() {
+    // 다음 start() 에서 새 비디오의 fps 가 다시 잡히도록 리셋.
+    this->fps_.store(0);
+
     // appsink는 gst_bin_get_by_name으로 ref가 늘어나 있으므로 unref로 해제.
     if (this->appsink_) {
         gst_object_unref(this->appsink_);
@@ -94,13 +97,23 @@ GstFlowReturn VideoPipeline::onNewSample(GstAppSink* sink, gpointer user_data) {
         return GST_FLOW_ERROR;
     }
 
-    // caps에서 프레임 해상도(width, height)를 추출.
+    // caps에서 프레임 해상도(width, height)와 framerate 를 추출.
     GstCaps* caps = gst_sample_get_caps(sample);
     int width = 0, height = 0;
     if (caps) {
         GstStructure* s = gst_caps_get_structure(caps, 0);
         gst_structure_get_int(s, "width", &width);
         gst_structure_get_int(s, "height", &height);
+
+        // framerate 는 fraction (num/den) 형식. fps = num / den 으로 환산.
+        // 이미 값이 잡혀 있으면 매 프레임 갱신할 필요 없으므로 한 번만 저장.
+        if (videoPipeline->fps_.load() == 0) {
+            int fpsNum = 0, fpsDen = 0;
+            if (gst_structure_get_fraction(s, "framerate", &fpsNum, &fpsDen) &&
+                fpsDen > 0) {
+                videoPipeline->fps_.store(fpsNum / fpsDen);
+            }
+        }
     }
 
     // 실제 픽셀 데이터를 가진 GstBuffer를 가져와 read 모드로 매핑.

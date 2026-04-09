@@ -30,6 +30,7 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-app-1.0
     gstreamer-video-1.0
+    gstreamer-rtsp-server-1.0
 )
 
 # 실행 파일 타깃을 먼저 만들고, 소스는 서브디렉토리에서 target_sources로 등록한다.
