@@ -57,14 +57,6 @@ MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWind
 }
 
 MainWindow::~MainWindow() {
-    // encoder_ 소멸 전에 onPlay 콜백을 해제한다.
-    // unique_ptr 소멸 순서(encoder_ → rtspServer_)에 의해 encoder_ 가 먼저
-    // 파괴되므로, rtspServer_ 의 GLib 메인 루프 스레드가 encoder_ 를 역참조하는
-    // 댕글링 호출이 발생하지 않도록 미리 정리한다.
-    if (this->rtspServer_) {
-        this->rtspServer_->setPlayCallback(nullptr);
-    }
-
     // 더 이상 새 프레임이 들어오지 않도록 파이프라인을 먼저 정지.
     if (this->pipeline_) {
         this->pipeline_->stop();
@@ -185,12 +177,6 @@ void MainWindow::onFrameReady(const QImage& image) {
                 [serverPtr](const uint8_t* data, size_t size) {
                     serverPtr->sendNal(data, size);
                 });
-            // PLAY 콜백: RTSP 클라이언트가 PLAY 를 보내면 즉시 IDR 을 강제 생성한다.
-            // 클라이언트가 GOP 중간에 연결해도 첫 프레임부터 정상 화면이 나온다.
-            H264Encoder* encoderPtr = this->encoder_.get();
-            this->rtspServer_->setPlayCallback([encoderPtr]() {
-                encoderPtr->forceKeyframe();
-            });
             if (!this->encoder_->start()) {
                 std::cerr << "H264Encoder 시작 실패" << std::endl;
                 this->encoder_.reset();
