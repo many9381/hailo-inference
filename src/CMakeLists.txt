@@ -14,3 +14,4 @@ target_sources(hailo_yolo_inference PRIVATE
 
 add_subdirectory(gui)
 add_subdirectory(gstreamer)
+add_subdirectory(rtsp)

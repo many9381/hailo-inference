@@ -13,7 +13,9 @@
 #include "PostProcessor.h"
 #include "Preprocessor.h"
 #include "Visualizer.h"
+#include "gstreamer/H264Encoder.h"
 #include "gstreamer/VideoPipeline.h"
+#include "rtsp/GstRtspServer.h"
 
 MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWindow(parent) {
     this->setWindowTitle("Hailo Inference GUI");
@@ -149,13 +151,54 @@ void MainWindow::onFrameReady(const QImage& image) {
         }
     }
 
-    // BGR → RGB → QImage. 외부 버퍼 참조이므로 .copy()로 분리해야 한다.
-    cv::Mat displayRgb;
-    cv::cvtColor(displayBgr, displayRgb, cv::COLOR_BGR2RGB);
-    QImage out(displayRgb.data, displayRgb.cols, displayRgb.rows,
-               static_cast<int>(displayRgb.step), QImage::Format_RGB888);
-    QPixmap pixmap = QPixmap::fromImage(out.copy());
-    this->videoLabel_->setPixmap(pixmap.scaled(this->videoLabel_->size(),
-                                               Qt::KeepAspectRatio,
-                                               Qt::SmoothTransformation));
+    // ── RTSP 송출 ─────────────────────────────────────────────────────
+    // 첫 프레임의 해상도가 확정되었을 때 RtspServer + H264Encoder 를 lazy-init.
+    // 이후 매 프레임 인코더에 push 하면 NAL 콜백을 통해 server.sendNal() 로 흘러간다.
+    if (!this->streamingInit_) {
+        // 비디오 caps 에서 추출한 실제 fps 를 사용. 0 이면 (아직 못 읽었거나
+        // 컨테이너에 framerate 가 없으면) 30 fps 로 fallback.
+        int fps = this->pipeline_ ? this->pipeline_->fps() : 0;
+        if (fps <= 0) fps = 30;
+        this->rtspServer_ = std::make_unique<GstRtspServer>(
+            8554, "/stream", displayBgr.cols, displayBgr.rows, fps);
+        if (!this->rtspServer_->start()) {
+            std::cerr << "GstRtspServer 시작 실패" << std::endl;
+            this->rtspServer_.reset();
+        } else {
+            this->encoder_ = std::make_unique<H264Encoder>(
+                displayBgr.cols, displayBgr.rows, fps);
+            // NAL 콜백: 인코더가 만드는 access unit(byte-stream, Annex-B start
+            // code 포함, 여러 NAL 이 연속) 을 그대로 GstRtspServer 에 전달한다.
+            // GstRtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
+            // 분할 없이 통째로 넘겨야 appsrc → h264parse → rtph264pay 가
+            // access unit 경계를 정확히 인식한다.
+            GstRtspServer* serverPtr = this->rtspServer_.get();
+            this->encoder_->setNalCallback(
+                [serverPtr](const uint8_t* data, size_t size) {
+                    serverPtr->sendNal(data, size);
+                });
+            if (!this->encoder_->start()) {
+                std::cerr << "H264Encoder 시작 실패" << std::endl;
+                this->encoder_.reset();
+                this->rtspServer_.reset();
+            } else {
+                std::cout << "RTSP 송출 시작: rtsp://<host>:8554/stream"
+                          << std::endl;
+            }
+        }
+        this->streamingInit_ = true;
+    }
+    if (this->encoder_) {
+        this->encoder_->pushFrame(displayBgr);
+    }
+
+    // [임시 비활성화] BGR → QLabel 표시 생략. 추론·RTSP 송출은 정상 동작.
+    // cv::Mat displayRgb;
+    // cv::cvtColor(displayBgr, displayRgb, cv::COLOR_BGR2RGB);
+    // QImage out(displayRgb.data, displayRgb.cols, displayRgb.rows,
+    //            static_cast<int>(displayRgb.step), QImage::Format_RGB888);
+    // QPixmap pixmap = QPixmap::fromImage(out.copy());
+    // this->videoLabel_->setPixmap(pixmap.scaled(this->videoLabel_->size(),
+    //                                            Qt::KeepAspectRatio,
+    //                                            Qt::SmoothTransformation));
 }
