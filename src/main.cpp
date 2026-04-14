@@ -6,13 +6,7 @@
 #include <QSettings>
 #include <QString>
 
-#ifdef BUILD_SERVER
 #include "gui/GuiApp.h"
-#endif
-
-#ifdef BUILD_CLIENT
-#include "client/ClientApp.h"
-#endif
 
 namespace fs = std::filesystem;
 
@@ -50,43 +44,52 @@ int main(int argc, char* argv[]) {
 
     QSettings cfg(QString::fromStdString(cfg_path.string()), QSettings::IniFormat);
 
+    // config.ini 의 [mode] role 로 동작을 분기한다.
+    std::string role = cfg.value("mode/role", "server").toString().toStdString();
+
     int         rtsp_port = cfg.value("rtsp/port",        8554).toInt();
     std::string rtsp_path = cfg.value("rtsp/stream_path", "/stream")
                                 .toString().toStdString();
 
-#ifdef BUILD_SERVER
-    std::string hef_path   = cfg.value("server/hef_path",  "")
-                                 .toString().toStdString();
-    std::string video_path = cfg.value("server/video_path", "")
-                                 .toString().toStdString();
+    GuiApp gui_app(argc, argv);
 
-    if (video_path.empty()) {
-        fs::path project_root = exe_dir.parent_path();
-        video_path = (project_root / "resource" / "VIRAT_S_000001.mp4").string();
+    if (role == "server") {
+        std::string hef_path   = cfg.value("server/hef_path",  "")
+                                     .toString().toStdString();
+        std::string video_path = cfg.value("server/video_path", "")
+                                     .toString().toStdString();
+
+        if (video_path.empty()) {
+            fs::path project_root = exe_dir.parent_path();
+            video_path = (project_root / "resource" / "VIRAT_S_000001.mp4").string();
+        }
+
+        std::cout << "[server] 시작"
+                  << " | hef_path="   << hef_path
+                  << " | video_path=" << video_path
+                  << " | rtsp_port="  << rtsp_port
+                  << " | rtsp_path="  << rtsp_path
+                  << std::endl;
+
+        return gui_app.run(hef_path, video_path, rtsp_port, rtsp_path);
     }
 
-    std::cout << "[server] 시작"
-              << " | hef_path="   << hef_path
-              << " | video_path=" << video_path
-              << " | rtsp_port="  << rtsp_port
-              << " | rtsp_path="  << rtsp_path
-              << std::endl;
+    if (role == "client") {
+        std::string server_ip = cfg.value("client/server_ip", "")
+                                    .toString().toStdString();
 
-    GuiApp gui_app(argc, argv);
-    return gui_app.run(hef_path, video_path, rtsp_port, rtsp_path);
-#endif
+        std::cout << "[client] 시작"
+                  << " | server_ip=" << (server_ip.empty() ? "(GUI 입력)" : server_ip)
+                  << " | rtsp_port=" << rtsp_port
+                  << " | rtsp_path=" << rtsp_path
+                  << std::endl;
 
-#ifdef BUILD_CLIENT
-    std::string server_ip = cfg.value("client/server_ip", "")
-                                .toString().toStdString();
+        // 클라이언트 모드에서는 server_ip 를 GuiApp::run() 의 video_path 인자로 재사용한다.
+        // (GuiApp.cpp 의 BUILD_CLIENT 경로에서 ClientWindow 의 서버 주소로 전달됨)
+        return gui_app.run("", server_ip, rtsp_port, rtsp_path);
+    }
 
-    std::cout << "[client] 시작"
-              << " | server_ip=" << (server_ip.empty() ? "(GUI 입력)" : server_ip)
-              << " | rtsp_port=" << rtsp_port
-              << " | rtsp_path=" << rtsp_path
-              << std::endl;
-
-    ClientApp client_app(argc, argv);
-    return client_app.run(server_ip, rtsp_port, rtsp_path);
-#endif
+    std::cerr << "[main] 알 수 없는 role: " << role
+              << " (server 또는 client 여야 함)" << std::endl;
+    return 1;
 }

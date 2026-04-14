@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+#include "ServerWindow.h"
 
 #include <QImage>
 #include <QLabel>
@@ -17,14 +17,14 @@
 #include "gstreamer/VideoPipeline.h"
 #include "rtsp_native/RtspServer.h"
 
-MainWindow::MainWindow(const std::string& hef_path,
-                       int rtsp_port, const std::string& rtsp_path,
-                       QWidget* parent)
+ServerWindow::ServerWindow(const std::string& hef_path,
+                           int rtsp_port, const std::string& rtsp_path,
+                           QWidget* parent)
     : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
     this->setWindowTitle("Hailo Inference GUI");
     this->resize(960, 720);
 
-    // this가 부모 → MainWindow 소멸 시 자동 delete
+    // this가 부모 → ServerWindow 소멸 시 자동 delete
     this->central_ = new QWidget(this);
 
     // central_이 부모 → 소멸 시 자동 delete
@@ -50,16 +50,16 @@ MainWindow::MainWindow(const std::string& hef_path,
 
     // 추론 엔진이 준비된 경우에만 워커 스레드를 가동.
     if (this->inference_) {
-        this->worker_ = std::thread(&MainWindow::inferenceLoop, this);
+        this->worker_ = std::thread(&ServerWindow::inferenceLoop, this);
     }
 
-    // this가 부모 → MainWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
+    // this가 부모 → ServerWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
     this->pipeline_ = new VideoPipeline(this);
     connect(this->pipeline_, &VideoPipeline::frameReady,
-            this, &MainWindow::onFrameReady);
+            this, &ServerWindow::onFrameReady);
 }
 
-MainWindow::~MainWindow() {
+ServerWindow::~ServerWindow() {
     // 더 이상 새 프레임이 들어오지 않도록 파이프라인을 먼저 정지.
     if (this->pipeline_) {
         this->pipeline_->stop();
@@ -75,13 +75,13 @@ MainWindow::~MainWindow() {
     }
 }
 
-void MainWindow::playVideo(const QString& filepath) {
+void ServerWindow::playVideo(const QString& filepath) {
     if (!this->pipeline_->start(filepath.toStdString())) {
         this->videoLabel_->setText("비디오 재생 실패: " + filepath);
     }
 }
 
-void MainWindow::inferenceLoop() {
+void ServerWindow::inferenceLoop() {
     while (true) {
         cv::Mat frame;
         {
@@ -123,7 +123,7 @@ void MainWindow::inferenceLoop() {
     }
 }
 
-void MainWindow::onFrameReady(const QImage& image) {
+void ServerWindow::onFrameReady(const QImage& image) {
     // QImage(RGB888) → cv::Mat(BGR) 변환. cvtColor가 새 버퍼를 할당하므로
     // 결과 bgr Mat은 QImage 수명과 독립적이다 (cv::Mat refcount로 관리됨).
     QImage rgb = image.convertToFormat(QImage::Format_RGB888);
