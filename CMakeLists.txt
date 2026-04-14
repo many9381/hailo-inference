@@ -9,9 +9,6 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# HailoRT
-find_package(HailoRT REQUIRED)
-
 # OpenCV
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
 
@@ -30,19 +27,41 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-app-1.0
     gstreamer-video-1.0
-    gstreamer-rtsp-server-1.0
 )
 
-# 실행 파일 타깃을 먼저 만들고, 소스는 서브디렉토리에서 target_sources로 등록한다.
-add_executable(hailo_yolo_inference)
+# ── server 실행 파일 ──────────────────────────────────────────────────────────
+# HailoRT (server 전용 — client 빌드 시에는 탐색하지 않는다)
+find_package(HailoRT QUIET)
 
-target_include_directories(hailo_yolo_inference PRIVATE
+add_executable(hailo_server)
+
+target_include_directories(hailo_server PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(hailo_yolo_inference PRIVATE
-    HailoRT::libhailort
+target_link_libraries(hailo_server PRIVATE
+    ${OpenCV_LIBS}
+    ${QT_LIBS}
+    PkgConfig::GST
+)
+
+if (HailoRT_FOUND)
+    target_link_libraries(hailo_server PRIVATE HailoRT::libhailort)
+    target_compile_definitions(hailo_server PRIVATE HAS_HAILORT)
+else()
+    message(WARNING "HailoRT not found — cannot build hailo_server")
+endif()
+
+# ── client 실행 파일 ──────────────────────────────────────────────────────────
+add_executable(hailo_client)
+
+target_include_directories(hailo_client PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(hailo_client PRIVATE
     ${OpenCV_LIBS}
     ${QT_LIBS}
     PkgConfig::GST

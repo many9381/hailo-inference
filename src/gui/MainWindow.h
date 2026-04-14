@@ -28,7 +28,10 @@ class MainWindow : public QMainWindow {
 
 public:
     // hef_path가 비어있지 않으면 HailoInference와 추론 워커 스레드를 초기화한다.
-    explicit MainWindow(const std::string& hef_path, QWidget* parent = nullptr);
+    // rtsp_port / rtsp_path: RTSP 서버 포트 및 스트림 경로.
+    explicit MainWindow(const std::string& hef_path,
+                        int rtsp_port, const std::string& rtsp_path,
+                        QWidget* parent = nullptr);
     ~MainWindow() override;
 
     // 비디오 파일 재생 시작
@@ -73,12 +76,15 @@ private:
 
     // ── RTSP 송출 ────────────────────────────────────────────────────────
     // 표시 중인 (검출 박스가 그려진) 프레임을 H.264 로 인코딩한 뒤
-    // 자체 구현 RtspServer (POSIX 소켓 기반) 를 통해 RTP 로 송출한다.
+    // native POSIX 소켓 기반 RtspServer 를 통해 RTP 로 송출한다.
     //
     // 첫 프레임이 들어와 해상도/fps 가 확정될 때 lazy-init 한다.
     // 소멸 순서가 중요: encoder_ 가 server_ 를 콜백으로 참조하므로
     // 선언 순서를 [server_, encoder_] 로 두어 encoder_ 가 먼저 파괴되게 한다.
-    std::unique_ptr<RtspServer>    rtspServer_;
+    int         rtspPort_ = 8554;
+    std::string rtspPath_ = "/stream";
+
+    std::unique_ptr<RtspServer> rtspServer_;
     std::unique_ptr<H264Encoder>   encoder_;
     bool streamingInit_ = false;
 };

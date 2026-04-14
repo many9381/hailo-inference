@@ -4,133 +4,29 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/types.h>
 #include <unistd.h>
 
+#include <QDebug>
+
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <iostream>
 #include <random>
 #include <sstream>
-#include <utility>
 
 // ============================================================================
-// 익명 네임스페이스 — 파일 로컬 유틸리티
-// ============================================================================
-namespace {
-
-// RTP 페이로드 크기의 상한선(여유 확보용). 일반 이더넷 MTU 1500 에서 IP/UDP
-// 헤더를 뺀 수준으로 맞춘다. FU-A 헤더 2 바이트 + RTP 헤더 12 바이트를 고려해
-// 실제 페이로드는 이보다 작게 잡힌다.
-constexpr size_t kMtu = 1400;
-
-// 문자열을 소문자로 변환 (대소문자 무시 헤더 검색용).
-std::string toLower(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    return out;
-}
-
-// RTSP 요청 문자열에서 특정 헤더 값을 추출 (대소문자 무시, 한 번만 매칭).
-std::string findHeader(const std::string& req, const std::string& name) {
-    std::string lowerReq  = toLower(req);
-    std::string lowerName = toLower(name);
-    size_t pos = 0;
-    while (pos < lowerReq.size()) {
-        size_t eol = lowerReq.find("\r\n", pos);
-        if (eol == std::string::npos) break;
-        if (eol - pos > lowerName.size() &&
-            lowerReq.compare(pos, lowerName.size(), lowerName) == 0 &&
-            lowerReq[pos + lowerName.size()] == ':') {
-            size_t valStart = pos + lowerName.size() + 1;
-            while (valStart < eol && (req[valStart] == ' ' || req[valStart] == '\t'))
-                ++valStart;
-            return req.substr(valStart, eol - valStart);
-        }
-        pos = eol + 2;
-    }
-    return {};
-}
-
-// CSeq 헤더를 정수로 파싱. 없으면 0.
-int parseCSeq(const std::string& req) {
-    std::string v = findHeader(req, "CSeq");
-    if (v.empty()) return 0;
-    return std::atoi(v.c_str());
-}
-
-// Transport 헤더에서 "client_port=RTP-RTCP" 값을 찾아 RTP 포트만 반환.
-bool parseClientPort(const std::string& transport, uint16_t* rtpPort) {
-    size_t p = transport.find("client_port=");
-    if (p == std::string::npos) return false;
-    p += std::strlen("client_port=");
-    int rtp = 0, rtcp = 0;
-    if (std::sscanf(transport.c_str() + p, "%d-%d", &rtp, &rtcp) < 1) return false;
-    if (rtp <= 0 || rtp > 65535) return false;
-    *rtpPort = static_cast<uint16_t>(rtp);
-    return true;
-}
-
-// 랜덤 세션 ID 생성 (16진수 문자열).
-std::string randomSessionId() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%08llx",
-                  static_cast<unsigned long long>(rng() & 0xFFFFFFFFull));
-    return std::string(buf);
-}
-
-// Annex-B byte-stream 에서 연속된 NAL 들의 시작 위치와 길이를 순회한다.
-// 구분자는 [00 00 00 01] 또는 [00 00 01]. 콜백에 시작 포인터/길이를 전달한다.
-template <typename Fn>
-void splitAnnexB(const uint8_t* data, size_t size, Fn&& onNal) {
-    // 다음 start code 위치 탐색. scLen 에는 3 또는 4 가 채워진다.
-    auto findStart = [&](size_t from, size_t* scLen) -> size_t {
-        for (size_t k = from; k + 2 < size; ++k) {
-            if (data[k] == 0 && data[k + 1] == 0) {
-                if (data[k + 2] == 1) { *scLen = 3; return k; }
-                if (k + 3 < size && data[k + 2] == 0 && data[k + 3] == 1) {
-                    *scLen = 4;
-                    return k;
-                }
-            }
-        }
-        return size;
-    };
-
-    size_t sc = 0;
-    size_t start = findStart(0, &sc);
-    if (start == size) return;  // start code 없음 → 빈 AU
-    size_t nalStart = start + sc;
-    while (nalStart < size) {
-        size_t nextSc = 0;
-        size_t next   = findStart(nalStart, &nextSc);
-        size_t nalEnd = next;
-        if (nalEnd > nalStart) onNal(data + nalStart, nalEnd - nalStart);
-        if (next == size) break;
-        nalStart = next + nextSc;
-    }
-}
-
-}  // namespace
-
-// ============================================================================
-// Session — 세션별 내부 상태
+// Session — 한 RTSP 클라이언트에 대한 세션 상태
 // ============================================================================
 struct RtspServer::Session {
-    int               tcpFd = -1;   // RTSP 제어 연결(연결 accept 시 생성)
-    int               udpFd = -1;   // RTP UDP 소켓 (SETUP 시 생성)
-    uint32_t          ssrc  = 0;    // RTP SSRC (세션 생성 시 난수)
-    uint16_t          seq   = 0;    // RTP 시퀀스 번호 카운터
-    std::string       sessionId;    // RTSP Session 헤더 값
-    sockaddr_in       clientRtpAddr{};   // 클라이언트 IP + RTP 수신 포트
-    std::atomic<bool> playing{false};    // PLAY 후 true, TEARDOWN/종료 시 false
-    std::atomic<bool> alive  {true};     // 세션 스레드 종료 요청 플래그
+    int              tcpFd     = -1;   // RTSP 제어 TCP 소켓
+    int              udpFd     = -1;   // RTP 송출 UDP 소켓
+    sockaddr_in      clientRtpAddr{};  // 클라이언트 RTP 수신 주소
+    std::string      id;               // Session ID
+    uint16_t         seq       = 0;    // RTP sequence number
+    uint32_t         ssrc      = 0;    // RTP SSRC
+    bool             playing   = false;
+    std::atomic<bool> alive{true};
 };
 
 // ============================================================================
@@ -146,308 +42,238 @@ RtspServer::~RtspServer() {
 }
 
 // ============================================================================
-// start — TCP 리스너 생성 + accept 스레드 가동
+// start — TCP 리스너 + accept 스레드
 // ============================================================================
 bool RtspServer::start() {
     this->stop();
 
     this->listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (this->listenFd_ < 0) {
-        std::cerr << "[RtspServer] socket 생성 실패: "
-                  << std::strerror(errno) << std::endl;
+        qWarning() << "[RtspServer] socket 실패:" << std::strerror(errno);
         return false;
     }
 
-    // 재시작 시 이전 소켓의 TIME_WAIT 로 인해 bind 실패하는 경우를 방지한다.
-    int one = 1;
-    ::setsockopt(this->listenFd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    int opt = 1;
+    ::setsockopt(this->listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port        = htons(static_cast<uint16_t>(this->port_));
+
     if (::bind(this->listenFd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        std::cerr << "[RtspServer] bind 실패 (port " << this->port_ << "): "
-                  << std::strerror(errno) << std::endl;
+        qWarning() << "[RtspServer] bind 실패:" << std::strerror(errno);
         ::close(this->listenFd_);
         this->listenFd_ = -1;
         return false;
     }
     if (::listen(this->listenFd_, 4) < 0) {
-        std::cerr << "[RtspServer] listen 실패: "
-                  << std::strerror(errno) << std::endl;
+        qWarning() << "[RtspServer] listen 실패:" << std::strerror(errno);
         ::close(this->listenFd_);
         this->listenFd_ = -1;
         return false;
     }
 
     this->running_.store(true);
-    this->acceptThread_ = std::thread([this] { this->acceptLoop(); });
+    this->acceptThread_ = std::thread(&RtspServer::acceptLoop, this);
 
-    std::cout << "[RtspServer] 시작: rtsp://<host>:" << this->port_
-              << this->mountPoint_ << "  (" << this->width_ << "x" << this->height_
-              << " @" << this->fps_ << "fps)" << std::endl;
+    qInfo() << "[RtspServer] 시작: rtsp://<host>:" << this->port_
+            << this->mountPoint_.c_str()
+            << " (" << this->width_ << "x" << this->height_
+            << " @" << this->fps_ << "fps)";
     return true;
 }
 
 // ============================================================================
-// stop — 모든 스레드/세션/소켓을 정리
+// stop
 // ============================================================================
 void RtspServer::stop() {
-    // running_ 이 이미 false 인 경우(두 번 호출 등) 남아있는 listen fd 만 정리한다.
-    if (!this->running_.exchange(false)) {
-        if (this->listenFd_ >= 0) {
-            ::close(this->listenFd_);
-            this->listenFd_ = -1;
-        }
-        return;
-    }
+    this->running_.store(false);
 
-    // accept 루프가 종료 플래그를 관찰하고 빠져나오길 기다린다.
-    if (this->acceptThread_.joinable()) this->acceptThread_.join();
     if (this->listenFd_ >= 0) {
         ::close(this->listenFd_);
         this->listenFd_ = -1;
     }
+    if (this->acceptThread_.joinable()) {
+        this->acceptThread_.join();
+    }
 
-    // 세션들에 종료 신호 후 스레드 컬렉션을 빼낸다.
-    std::vector<std::thread> threads;
     {
         std::lock_guard<std::mutex> lock(this->sessionsMu_);
         for (auto& s : this->sessions_) {
             s->alive.store(false);
-            s->playing.store(false);
+            if (s->tcpFd >= 0) { ::close(s->tcpFd); s->tcpFd = -1; }
+            if (s->udpFd >= 0) { ::close(s->udpFd); s->udpFd = -1; }
         }
-        threads.swap(this->sessionThreads_);
     }
-
-    // 세션 스레드는 SO_RCVTIMEO 만료마다 alive 플래그를 확인하므로 곧 종료된다.
-    for (auto& t : threads) {
+    for (auto& t : this->sessionThreads_) {
         if (t.joinable()) t.join();
     }
-
     {
         std::lock_guard<std::mutex> lock(this->sessionsMu_);
         this->sessions_.clear();
+        this->sessionThreads_.clear();
     }
+
     this->frameIndex_ = 0;
 }
 
 // ============================================================================
-// acceptLoop — poll() 로 listen fd 를 감시하며 새 연결 수락
+// acceptLoop — poll() 로 새 연결 대기
 // ============================================================================
 void RtspServer::acceptLoop() {
     while (this->running_.load()) {
         pollfd pfd{};
         pfd.fd     = this->listenFd_;
         pfd.events = POLLIN;
-        int r = ::poll(&pfd, 1, 500);  // 500ms 마다 종료 플래그 재확인
-        if (r <= 0) continue;
-        if (!(pfd.revents & POLLIN)) continue;
+        int ret = ::poll(&pfd, 1, 500);  // 500ms 주기로 종료 확인
+        if (ret <= 0) continue;
 
-        sockaddr_in peer{};
-        socklen_t   peerLen = sizeof(peer);
-        int clientFd = ::accept(this->listenFd_,
-                                reinterpret_cast<sockaddr*>(&peer), &peerLen);
-        if (clientFd < 0) {
-            if (!this->running_.load()) break;
-            if (errno == EINTR) continue;
-            std::cerr << "[RtspServer] accept 실패: "
-                      << std::strerror(errno) << std::endl;
-            break;
-        }
+        sockaddr_in clientAddr{};
+        socklen_t   addrLen = sizeof(clientAddr);
+        int fd = ::accept(this->listenFd_,
+                          reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
+        if (fd < 0) continue;
 
-        // 세션 객체 생성 및 기본값 채우기.
-        auto s = std::make_shared<Session>();
-        s->tcpFd = clientFd;
+        auto session = std::make_shared<Session>();
+        session->tcpFd = fd;
+
+        // 랜덤 Session ID + SSRC 생성
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dist;
+        session->ssrc = dist(gen);
         {
-            static thread_local std::mt19937 rng{std::random_device{}()};
-            s->ssrc = static_cast<uint32_t>(rng());
-        }
-        // 클라이언트 IP 는 accept 된 peer 에서 그대로 가져오고, RTP 포트는
-        // SETUP 에서 client_port 헤더로 다시 채운다.
-        s->clientRtpAddr = peer;
-
-        // 세션 스레드 등록은 락 안에서 수행해 stop() 과의 경쟁을 피한다.
-        {
-            std::lock_guard<std::mutex> lock(this->sessionsMu_);
-            if (!this->running_.load()) {
-                ::close(clientFd);
-                break;
-            }
-            this->sessions_.push_back(s);
-            this->sessionThreads_.emplace_back([this, s] { this->sessionLoop(s); });
+            std::ostringstream oss;
+            oss << std::hex << dist(gen);
+            session->id = oss.str();
         }
 
-        char ipBuf[INET_ADDRSTRLEN] = {0};
-        ::inet_ntop(AF_INET, &peer.sin_addr, ipBuf, sizeof(ipBuf));
-        std::cout << "[RtspServer] 세션 연결: " << ipBuf << std::endl;
+        std::lock_guard<std::mutex> lock(this->sessionsMu_);
+        this->sessions_.push_back(session);
+        this->sessionThreads_.emplace_back(&RtspServer::sessionLoop, this, session);
+
+        char ipBuf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf));
+        qInfo() << "[RtspServer] 클라이언트 연결:" << ipBuf;
     }
 }
 
 // ============================================================================
-// sessionLoop — RTSP 요청을 읽어 handleRequest 로 위임
+// sessionLoop — RTSP 요청 수신 및 처리
 // ============================================================================
-void RtspServer::sessionLoop(std::shared_ptr<Session> s) {
-    // recv 블로킹 중 stop() 신호를 놓치지 않도록 읽기 타임아웃을 걸어둔다.
-    timeval tv{};
-    tv.tv_sec  = 0;
-    tv.tv_usec = 300 * 1000;  // 300ms
-    ::setsockopt(s->tcpFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
+void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
     std::string buffer;
-    char        chunk[2048];
-    bool        keepRunning = true;
+    char chunk[2048];
 
-    while (keepRunning && this->running_.load() && s->alive.load()) {
-        ssize_t n = ::recv(s->tcpFd, chunk, sizeof(chunk), 0);
-        if (n == 0) break;                                    // 상대가 닫음
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;  // 타임아웃
-            if (errno == EINTR) continue;
-            break;
-        }
+    while (this->running_.load() && session->alive.load()) {
+        pollfd pfd{};
+        pfd.fd     = session->tcpFd;
+        pfd.events = POLLIN;
+        int ret = ::poll(&pfd, 1, 500);
+        if (ret <= 0) continue;
+
+        ssize_t n = ::recv(session->tcpFd, chunk, sizeof(chunk), 0);
+        if (n <= 0) break;
         buffer.append(chunk, chunk + n);
 
-        // "\r\n\r\n" 으로 끝나는 완전한 요청을 하나씩 꺼내 처리한다.
-        for (;;) {
-            size_t end = buffer.find("\r\n\r\n");
-            if (end == std::string::npos) break;
-            std::string req = buffer.substr(0, end + 4);
-            buffer.erase(0, end + 4);
-            if (!this->handleRequest(*s, req)) {
-                keepRunning = false;
+        // 완전한 요청(\r\n\r\n) 이 들어올 때까지 누적
+        size_t pos;
+        while ((pos = buffer.find("\r\n\r\n")) != std::string::npos) {
+            std::string req = buffer.substr(0, pos + 4);
+            buffer.erase(0, pos + 4);
+            if (!this->handleRequest(*session, req)) {
+                session->alive.store(false);
                 break;
             }
         }
     }
 
-    // ── 세션 정리 ────────────────────────────────────────────────────────
-    // sessionsMu_ 를 잡은 상태에서 udpFd 를 닫아야 sendNal() 과 경쟁하지 않는다.
-    {
-        std::lock_guard<std::mutex> lock(this->sessionsMu_);
-        s->playing.store(false);
-        s->alive.store(false);
-        if (s->udpFd >= 0) {
-            ::close(s->udpFd);
-            s->udpFd = -1;
-        }
-    }
-    if (s->tcpFd >= 0) {
-        ::close(s->tcpFd);
-        s->tcpFd = -1;
-    }
-    std::cout << "[RtspServer] 세션 종료 (id="
-              << (s->sessionId.empty() ? "-" : s->sessionId) << ")" << std::endl;
+    if (session->tcpFd >= 0) { ::close(session->tcpFd); session->tcpFd = -1; }
+    if (session->udpFd >= 0) { ::close(session->udpFd); session->udpFd = -1; }
 }
 
 // ============================================================================
-// handleRequest — 한 개의 완전한 RTSP 요청 처리
+// handleRequest — RTSP 메서드 분기
 // ============================================================================
 bool RtspServer::handleRequest(Session& s, const std::string& req) {
-    // 첫 줄: "METHOD URI RTSP/1.0"
-    size_t firstEol = req.find("\r\n");
-    if (firstEol == std::string::npos) return true;
-    std::string firstLine = req.substr(0, firstEol);
+    // CSeq 파싱
+    int cseq = 1;
+    {
+        size_t p = req.find("CSeq:");
+        if (p == std::string::npos) p = req.find("cseq:");
+        if (p != std::string::npos)
+            cseq = std::atoi(req.c_str() + p + 5);
+    }
 
-    std::istringstream iss(firstLine);
-    std::string method, uri, version;
-    iss >> method >> uri >> version;
-    if (method.empty()) return true;
-
-    int cseq = parseCSeq(req);
     std::string response;
 
-    if (method == "OPTIONS") {
+    if (req.compare(0, 7, "OPTIONS") == 0) {
         response = this->buildOptionsResponse(cseq);
-
-    } else if (method == "DESCRIBE") {
+    } else if (req.compare(0, 8, "DESCRIBE") == 0) {
+        // URI 파싱
+        size_t sp = req.find(' ');
+        size_t ep = req.find(' ', sp + 1);
+        std::string uri = req.substr(sp + 1, ep - sp - 1);
         response = this->buildDescribeResponse(cseq, uri);
-
-    } else if (method == "SETUP") {
-        std::string transport     = findHeader(req, "Transport");
-        uint16_t    clientRtpPort = 0;
-
-        // UDP 유니캐스트 외 전송(TCP interleaved 등) 은 지원하지 않는다.
-        if (transport.find("RTP/AVP") == std::string::npos ||
-            transport.find("TCP") != std::string::npos ||
-            !parseClientPort(transport, &clientRtpPort)) {
-            response = this->buildErrorResponse(cseq, 461, "Unsupported Transport");
-        } else {
-            // 서버측 RTP UDP 소켓 생성 (포트 0 → 커널 자동 할당).
-            int udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (udpFd < 0) {
-                response = this->buildErrorResponse(cseq, 500, "Internal Server Error");
-            } else {
-                sockaddr_in localAddr{};
-                localAddr.sin_family      = AF_INET;
-                localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-                localAddr.sin_port        = 0;
-                if (::bind(udpFd, reinterpret_cast<sockaddr*>(&localAddr),
-                           sizeof(localAddr)) < 0) {
-                    ::close(udpFd);
-                    response = this->buildErrorResponse(cseq, 500,
-                                                         "Internal Server Error");
-                } else {
-                    socklen_t localLen = sizeof(localAddr);
-                    ::getsockname(udpFd,
-                                  reinterpret_cast<sockaddr*>(&localAddr),
-                                  &localLen);
-                    uint16_t serverPort = ntohs(localAddr.sin_port);
-
-                    // Session 상태 갱신 — sendNal() 과의 동시 접근을 막기 위해
-                    // sessionsMu_ 를 잡고 한꺼번에 쓴다.
-                    std::string sid;
-                    {
-                        std::lock_guard<std::mutex> lock(this->sessionsMu_);
-                        // SETUP 이 여러 번 오면 기존 UDP 를 정리한다.
-                        if (s.udpFd >= 0) ::close(s.udpFd);
-                        s.udpFd = udpFd;
-                        s.clientRtpAddr.sin_port = htons(clientRtpPort);
-                        if (s.sessionId.empty()) {
-                            s.sessionId = randomSessionId();
-                        }
-                        sid = s.sessionId;
-                    }
-
-                    std::ostringstream tr;
-                    tr << "RTP/AVP;unicast;client_port=" << clientRtpPort << "-"
-                       << (clientRtpPort + 1)
-                       << ";server_port=" << serverPort << "-" << (serverPort + 1)
-                       << ";ssrc=" << std::hex << s.ssrc << std::dec;
-                    response = this->buildSetupResponse(cseq, sid, tr.str());
-                }
-            }
+    } else if (req.compare(0, 5, "SETUP") == 0) {
+        // Transport 헤더에서 client_port 추출
+        std::string transport;
+        size_t tp = req.find("Transport:");
+        if (tp == std::string::npos) tp = req.find("transport:");
+        if (tp != std::string::npos) {
+            size_t eol = req.find("\r\n", tp);
+            transport = req.substr(tp + 10, eol - tp - 10);
+            // 앞쪽 공백 제거
+            size_t start = transport.find_first_not_of(" \t");
+            if (start != std::string::npos) transport = transport.substr(start);
         }
 
-    } else if (method == "PLAY") {
-        s.playing.store(true);
-        response = this->buildPlayResponse(cseq, s.sessionId);
-        std::cout << "[RtspServer] PLAY 시작 (session=" << s.sessionId << ")"
-                  << std::endl;
+        // client_port 추출
+        uint16_t clientRtpPort = 0;
+        size_t cp = transport.find("client_port=");
+        if (cp != std::string::npos) {
+            clientRtpPort = static_cast<uint16_t>(
+                std::atoi(transport.c_str() + cp + 12));
+        }
 
-    } else if (method == "PAUSE") {
-        s.playing.store(false);
-        response = this->buildGenericOkResponse(cseq, s.sessionId);
+        // 클라이언트 IP (TCP 소켓에서 추출)
+        sockaddr_in peerAddr{};
+        socklen_t   peerLen = sizeof(peerAddr);
+        ::getpeername(s.tcpFd, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
 
-    } else if (method == "TEARDOWN") {
-        s.playing.store(false);
-        response = this->buildTeardownResponse(cseq, s.sessionId);
-        // TEARDOWN 후에는 응답만 보내고 연결을 닫는다.
+        // UDP 소켓 생성
+        s.udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        s.clientRtpAddr.sin_family      = AF_INET;
+        s.clientRtpAddr.sin_addr        = peerAddr.sin_addr;
+        s.clientRtpAddr.sin_port        = htons(clientRtpPort);
+
+        // server_port 를 알려주기 위해 바인드
+        sockaddr_in localAddr{};
+        localAddr.sin_family      = AF_INET;
+        localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        localAddr.sin_port        = 0;
+        ::bind(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), sizeof(localAddr));
+        socklen_t localLen = sizeof(localAddr);
+        ::getsockname(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), &localLen);
+        uint16_t serverRtpPort = ntohs(localAddr.sin_port);
+
+        response = this->buildSetupResponse(cseq, s.id, transport +
+            ";server_port=" + std::to_string(serverRtpPort) + "-" +
+            std::to_string(serverRtpPort + 1));
+    } else if (req.compare(0, 4, "PLAY") == 0) {
+        s.playing = true;
+        response = this->buildPlayResponse(cseq, s.id);
+    } else if (req.compare(0, 8, "TEARDOWN") == 0) {
+        response = this->buildTeardownResponse(cseq, s.id);
         ::send(s.tcpFd, response.data(), response.size(), 0);
-        return false;
-
-    } else if (method == "GET_PARAMETER" || method == "SET_PARAMETER") {
-        // keepalive 용으로만 지원: 본문 없이 200 OK 반환.
-        response = this->buildGenericOkResponse(cseq, s.sessionId);
-
+        return false;  // 세션 종료
     } else {
-        response = this->buildErrorResponse(cseq, 501, "Not Implemented");
+        response = this->buildGenericOkResponse(cseq, s.id);
     }
 
     ssize_t sent = ::send(s.tcpFd, response.data(), response.size(), 0);
-    if (sent < 0) return false;
-    return true;
+    return sent >= 0;
 }
 
 // ============================================================================
@@ -457,49 +283,39 @@ std::string RtspServer::buildOptionsResponse(int cseq) {
     std::ostringstream oss;
     oss << "RTSP/1.0 200 OK\r\n"
         << "CSeq: " << cseq << "\r\n"
-        << "Public: OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN, "
-        << "GET_PARAMETER, SET_PARAMETER\r\n"
-        << "\r\n";
+        << "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n\r\n";
     return oss.str();
 }
 
 std::string RtspServer::buildDescribeResponse(int cseq, const std::string& uri) {
-    // SDP 본문: H.264 단일 비디오 트랙, RTP 페이로드 타입 96, 90kHz 클럭.
-    // packetization-mode=1: single NAL + FU-A 지원. profile-level-id 는
-    // constrained baseline/high 중 어느 수준이어도 무방하나 VLC/ffmpeg 호환을
-    // 위해 baseline 수준 값을 관용적으로 적어둔다.
     std::ostringstream sdp;
     sdp << "v=0\r\n"
-        << "o=- 0 0 IN IP4 127.0.0.1\r\n"
-        << "s=Hailo H264 Stream\r\n"
+        << "o=- 0 0 IN IP4 0.0.0.0\r\n"
+        << "s=Hailo Stream\r\n"
         << "c=IN IP4 0.0.0.0\r\n"
         << "t=0 0\r\n"
-        << "a=tool:hailo-rtsp\r\n"
         << "m=video 0 RTP/AVP 96\r\n"
         << "a=rtpmap:96 H264/90000\r\n"
-        << "a=fmtp:96 packetization-mode=1;profile-level-id=42e01f\r\n"
         << "a=control:trackID=0\r\n";
-    std::string body = sdp.str();
+    std::string sdpStr = sdp.str();
 
     std::ostringstream oss;
     oss << "RTSP/1.0 200 OK\r\n"
         << "CSeq: " << cseq << "\r\n"
         << "Content-Base: " << uri << "/\r\n"
         << "Content-Type: application/sdp\r\n"
-        << "Content-Length: " << body.size() << "\r\n"
-        << "\r\n"
-        << body;
+        << "Content-Length: " << sdpStr.size() << "\r\n\r\n"
+        << sdpStr;
     return oss.str();
 }
 
 std::string RtspServer::buildSetupResponse(int cseq, const std::string& sessionId,
-                                            const std::string& transport) {
+                                           const std::string& transport) {
     std::ostringstream oss;
     oss << "RTSP/1.0 200 OK\r\n"
         << "CSeq: " << cseq << "\r\n"
-        << "Session: " << sessionId << ";timeout=60\r\n"
-        << "Transport: " << transport << "\r\n"
-        << "\r\n";
+        << "Session: " << sessionId << "\r\n"
+        << "Transport: " << transport << "\r\n\r\n";
     return oss.str();
 }
 
@@ -508,8 +324,7 @@ std::string RtspServer::buildPlayResponse(int cseq, const std::string& sessionId
     oss << "RTSP/1.0 200 OK\r\n"
         << "CSeq: " << cseq << "\r\n"
         << "Session: " << sessionId << "\r\n"
-        << "Range: npt=0.000-\r\n"
-        << "\r\n";
+        << "Range: npt=0.000-\r\n\r\n";
     return oss.str();
 }
 
@@ -517,137 +332,144 @@ std::string RtspServer::buildTeardownResponse(int cseq, const std::string& sessi
     std::ostringstream oss;
     oss << "RTSP/1.0 200 OK\r\n"
         << "CSeq: " << cseq << "\r\n"
-        << "Session: " << sessionId << "\r\n"
-        << "\r\n";
+        << "Session: " << sessionId << "\r\n\r\n";
     return oss.str();
 }
 
 std::string RtspServer::buildGenericOkResponse(int cseq, const std::string& sessionId) {
-    std::ostringstream oss;
-    oss << "RTSP/1.0 200 OK\r\n"
-        << "CSeq: " << cseq << "\r\n";
-    if (!sessionId.empty()) oss << "Session: " << sessionId << "\r\n";
-    oss << "\r\n";
-    return oss.str();
+    return this->buildTeardownResponse(cseq, sessionId);  // 같은 포맷
 }
 
-std::string RtspServer::buildErrorResponse(int cseq, int code,
-                                            const std::string& reason) {
+std::string RtspServer::buildErrorResponse(int cseq, int code, const std::string& reason) {
     std::ostringstream oss;
     oss << "RTSP/1.0 " << code << " " << reason << "\r\n"
-        << "CSeq: " << cseq << "\r\n"
-        << "\r\n";
+        << "CSeq: " << cseq << "\r\n\r\n";
     return oss.str();
 }
 
 // ============================================================================
-// sendNal — AU 를 NAL 로 분해하여 모든 PLAY 세션에 RTP 전송
+// sendNal — 모든 PLAY 세션에 access unit 전송 (RTP 패킷화)
 // ============================================================================
 void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
     if (!this->running_.load() || nalSize == 0) return;
 
-    // 90kHz RTP 타임스탬프. 한 호출 = 한 frame 규약이므로 frameIndex_ 를 증가.
-    // 세션별 초기 오프셋은 상관없으므로 전역 frameIndex_ 를 그대로 사용한다.
     uint32_t rtpTs = static_cast<uint32_t>(
-        (this->frameIndex_ * 90000ULL) / static_cast<uint64_t>(this->fps_));
+        this->frameIndex_ * 90000 / static_cast<uint64_t>(this->fps_));
     ++this->frameIndex_;
 
-    // AU → NAL 목록으로 분해.
+    // Annex-B byte-stream 에서 NAL 단위를 추출
     std::vector<std::pair<const uint8_t*, size_t>> nals;
-    splitAnnexB(nalData, nalSize, [&](const uint8_t* p, size_t sz) {
-        if (sz > 0) nals.emplace_back(p, sz);
-    });
-    if (nals.empty()) return;
+    size_t i = 0;
+    while (i < nalSize) {
+        // start code 찾기: 0x000001 또는 0x00000001
+        size_t scLen = 0;
+        if (i + 3 <= nalSize && nalData[i] == 0 && nalData[i+1] == 0 && nalData[i+2] == 1) {
+            scLen = 3;
+        } else if (i + 4 <= nalSize && nalData[i] == 0 && nalData[i+1] == 0 &&
+                   nalData[i+2] == 0 && nalData[i+3] == 1) {
+            scLen = 4;
+        } else {
+            ++i;
+            continue;
+        }
 
-    // 모든 PLAY 세션에 동일한 AU 를 뿌린다. 락 범위 내에서 sendto 까지 수행해
-    // 세션 정리(close) 와의 경쟁을 단순화한다.
+        size_t nalStart = i + scLen;
+        // 다음 start code 또는 끝까지
+        size_t nalEnd = nalSize;
+        for (size_t j = nalStart; j + 3 <= nalSize; ++j) {
+            if (nalData[j] == 0 && nalData[j+1] == 0 &&
+                (nalData[j+2] == 1 || (j + 3 < nalSize && nalData[j+2] == 0 && nalData[j+3] == 1))) {
+                nalEnd = j;
+                break;
+            }
+        }
+
+        if (nalEnd > nalStart) {
+            nals.emplace_back(nalData + nalStart, nalEnd - nalStart);
+        }
+        i = nalEnd;
+    }
+
     std::lock_guard<std::mutex> lock(this->sessionsMu_);
-    for (auto& sp : this->sessions_) {
-        Session& s = *sp;
-        if (!s.alive.load() || !s.playing.load() || s.udpFd < 0) continue;
-        for (size_t i = 0; i < nals.size(); ++i) {
-            const bool lastNal = (i + 1 == nals.size());
-            this->sendNalToSession(s, rtpTs, nals[i].first, nals[i].second, lastNal);
+    for (auto& session : this->sessions_) {
+        if (!session->playing || session->udpFd < 0) continue;
+        for (size_t n = 0; n < nals.size(); ++n) {
+            this->sendNalToSession(*session, rtpTs,
+                                   nals[n].first, nals[n].second,
+                                   n == nals.size() - 1);
         }
     }
 }
 
 // ============================================================================
-// sendNalToSession — RFC 6184 single NAL / FU-A 분기 후 송신
+// sendNalToSession — Single NAL 또는 FU-A 패킷화
 // ============================================================================
+static constexpr size_t MAX_RTP_PAYLOAD = 1400;
+
 void RtspServer::sendNalToSession(Session& s, uint32_t rtpTs,
-                                   const uint8_t* nal, size_t size, bool lastNal) {
-    if (size == 0) return;
-
-    // 작은 NAL: Single NAL unit 모드 — RTP payload == NAL 전체.
-    if (size + 12 <= kMtu) {
+                                  const uint8_t* nal, size_t size,
+                                  bool lastNal) {
+    if (size <= MAX_RTP_PAYLOAD) {
+        // Single NAL unit
         this->sendRtpPacket(s, rtpTs, lastNal, nal, size);
-        return;
-    }
+    } else {
+        // FU-A fragmentation
+        uint8_t nalHeader = nal[0];
+        uint8_t fnri      = nalHeader & 0xE0;  // F + NRI
+        uint8_t type      = nalHeader & 0x1F;
 
-    // 큰 NAL: FU-A 로 쪼갠다.
-    //   FU indicator (1 byte): [F=원래NAL의 F | NRI=원래NAL의 NRI | type=28]
-    //   FU header    (1 byte): [S | E | R=0 | type=원래NAL type]
-    //   payload: 원래 NAL 의 header(1B) 를 제외한 RBSP 를 조각별로 복사
-    const uint8_t nalHeader = nal[0];
-    const uint8_t nri       = nalHeader & 0x60;
-    const uint8_t type      = nalHeader & 0x1F;
-    const uint8_t* body     = nal + 1;
-    const size_t   bodySize = size - 1;
+        const uint8_t* ptr       = nal + 1;
+        size_t         remaining = size - 1;
+        bool           first     = true;
 
-    // RTP(12) + FU ind(1) + FU hdr(1) 만큼을 제외한 최대 조각 크기.
-    const size_t maxPayload = kMtu - 12 - 2;
+        while (remaining > 0) {
+            size_t chunkSize = std::min(remaining, MAX_RTP_PAYLOAD - 2);
+            bool   last      = (chunkSize == remaining);
 
-    size_t offset = 0;
-    uint8_t frag[kMtu];
-    while (offset < bodySize) {
-        const size_t chunk = std::min(maxPayload, bodySize - offset);
-        const bool   start = (offset == 0);
-        const bool   end   = (offset + chunk == bodySize);
+            uint8_t fuIndicator = fnri | 28;  // type = 28 (FU-A)
+            uint8_t fuHeader    = type;
+            if (first) fuHeader |= 0x80;  // S bit
+            if (last)  fuHeader |= 0x40;  // E bit
 
-        frag[0] = static_cast<uint8_t>(0x1C | nri);  // FU indicator: type = 28
-        frag[1] = static_cast<uint8_t>((start ? 0x80 : 0) | (end ? 0x40 : 0) | type);
-        std::memcpy(frag + 2, body + offset, chunk);
+            uint8_t packet[2 + MAX_RTP_PAYLOAD];
+            packet[0] = fuIndicator;
+            packet[1] = fuHeader;
+            std::memcpy(packet + 2, ptr, chunkSize);
 
-        // marker bit 은 AU 의 가장 마지막 RTP 패킷에만 세운다.
-        const bool marker = (end && lastNal);
-        this->sendRtpPacket(s, rtpTs, marker, frag, chunk + 2);
-        offset += chunk;
+            this->sendRtpPacket(s, rtpTs, last && lastNal, packet, chunkSize + 2);
+
+            ptr       += chunkSize;
+            remaining -= chunkSize;
+            first      = false;
+        }
     }
 }
 
 // ============================================================================
-// sendRtpPacket — RTP 헤더 작성 후 UDP 로 1회 송신
+// sendRtpPacket — RTP 헤더 + 페이로드 → UDP 송신
 // ============================================================================
 void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
-                                const uint8_t* payload, size_t size) {
-    // RTP 고정 헤더 12 바이트
-    //   byte 0:  V(2)=2 | P=0 | X=0 | CC=0            → 0x80
-    //   byte 1:  M(1)    | PT(7)=96                   → marker ? 0xE0 : 0x60
-    //   byte 2-3: sequence number (big-endian)
-    //   byte 4-7: timestamp       (big-endian, 90kHz)
-    //   byte 8-11: SSRC           (big-endian)
-    uint8_t packet[kMtu + 12];
-    packet[0] = 0x80;
-    packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0) | 96);
+                               const uint8_t* payload, size_t size) {
+    uint8_t packet[12 + MAX_RTP_PAYLOAD + 2];
 
-    const uint16_t seq = s.seq++;
-    packet[2] = static_cast<uint8_t>((seq >> 8) & 0xFF);
-    packet[3] = static_cast<uint8_t>(seq & 0xFF);
-
-    packet[4] = static_cast<uint8_t>((rtpTs >> 24) & 0xFF);
-    packet[5] = static_cast<uint8_t>((rtpTs >> 16) & 0xFF);
-    packet[6] = static_cast<uint8_t>((rtpTs >>  8) & 0xFF);
-    packet[7] = static_cast<uint8_t>( rtpTs        & 0xFF);
-
+    // RTP header (12 bytes)
+    packet[0]  = 0x80;  // V=2
+    packet[1]  = static_cast<uint8_t>(96 | (marker ? 0x80 : 0));  // PT=96
+    packet[2]  = static_cast<uint8_t>((s.seq >> 8) & 0xFF);
+    packet[3]  = static_cast<uint8_t>(s.seq & 0xFF);
+    packet[4]  = static_cast<uint8_t>((rtpTs >> 24) & 0xFF);
+    packet[5]  = static_cast<uint8_t>((rtpTs >> 16) & 0xFF);
+    packet[6]  = static_cast<uint8_t>((rtpTs >> 8)  & 0xFF);
+    packet[7]  = static_cast<uint8_t>(rtpTs & 0xFF);
     packet[8]  = static_cast<uint8_t>((s.ssrc >> 24) & 0xFF);
     packet[9]  = static_cast<uint8_t>((s.ssrc >> 16) & 0xFF);
-    packet[10] = static_cast<uint8_t>((s.ssrc >>  8) & 0xFF);
-    packet[11] = static_cast<uint8_t>( s.ssrc        & 0xFF);
+    packet[10] = static_cast<uint8_t>((s.ssrc >> 8)  & 0xFF);
+    packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
     std::memcpy(packet + 12, payload, size);
+    ++s.seq;
 
-    ::sendto(s.udpFd, packet, size + 12, 0,
-             reinterpret_cast<sockaddr*>(&s.clientRtpAddr),
+    ::sendto(s.udpFd, packet, 12 + size, 0,
+             reinterpret_cast<const sockaddr*>(&s.clientRtpAddr),
              sizeof(s.clientRtpAddr));
 }

@@ -17,7 +17,10 @@
 #include "gstreamer/VideoPipeline.h"
 #include "rtsp_native/RtspServer.h"
 
-MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(const std::string& hef_path,
+                       int rtsp_port, const std::string& rtsp_path,
+                       QWidget* parent)
+    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
     this->setWindowTitle("Hailo Inference GUI");
     this->resize(960, 720);
 
@@ -160,7 +163,8 @@ void MainWindow::onFrameReady(const QImage& image) {
         int fps = this->pipeline_ ? this->pipeline_->fps() : 0;
         if (fps <= 0) fps = 30;
         this->rtspServer_ = std::make_unique<RtspServer>(
-            8554, "/stream", displayBgr.cols, displayBgr.rows, fps);
+            this->rtspPort_, this->rtspPath_,
+            displayBgr.cols, displayBgr.rows, fps);
         if (!this->rtspServer_->start()) {
             std::cerr << "RtspServer 시작 실패" << std::endl;
             this->rtspServer_.reset();
@@ -169,8 +173,9 @@ void MainWindow::onFrameReady(const QImage& image) {
                 displayBgr.cols, displayBgr.rows, fps);
             // NAL 콜백: 인코더가 만드는 access unit(byte-stream, Annex-B start
             // code 포함, 여러 NAL 이 연속) 을 그대로 RtspServer 에 전달한다.
-            // RtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로 내부에서
-            // NAL 단위로 쪼개어 RFC 6184 packetization-mode 1 로 송신한다.
+            // RtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
+            // 분할 없이 통째로 넘겨야 appsrc → h264parse → rtph264pay 가
+            // access unit 경계를 정확히 인식한다.
             RtspServer* serverPtr = this->rtspServer_.get();
             this->encoder_->setNalCallback(
                 [serverPtr](const uint8_t* data, size_t size) {
@@ -181,7 +186,8 @@ void MainWindow::onFrameReady(const QImage& image) {
                 this->encoder_.reset();
                 this->rtspServer_.reset();
             } else {
-                std::cout << "RTSP 송출 시작: rtsp://<host>:8554/stream"
+                std::cout << "RTSP 송출 시작: rtsp://<host>:"
+                          << this->rtspPort_ << this->rtspPath_
                           << std::endl;
             }
         }

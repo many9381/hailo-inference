@@ -1,0 +1,20 @@
+[mode]
+; 실행 역할 선택: "server" 또는 "client"
+role = client
+
+[server]
+; Hailo HEF 모델 경로 (server 모드에서만 사용)
+hef_path = models/yolov8n.hef
+; 추론할 비디오 파일 경로. 비워두면 실행 파일 상위 디렉토리의
+video_path = resource/sample.mp4
+
+[rtsp]
+; RTSP 서버 포트 (server: 송출, client: 수신에 공통 사용)
+port = 8554
+; RTSP 스트림 경로
+stream_path = /stream
+
+[client]
+; 접속할 서버 IP 주소 (client 모드에서만 사용)
+; 비워두면 GUI에서 직접 입력한다.
+server_ip = 127.0.0.1

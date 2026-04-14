@@ -14,7 +14,9 @@ public:
 
     // hef_path로 추론 엔진을 초기화한 MainWindow를 띄우고 이벤트 루프를 실행한다.
     // video_path가 비어있지 않으면 시작 직후 재생을 시작한다.
-    int run(const std::string& hef_path, const std::string& video_path);
+    // rtsp_port / rtsp_path: RTSP 송출에 사용할 포트와 스트림 경로.
+    int run(const std::string& hef_path, const std::string& video_path,
+            int rtsp_port, const std::string& rtsp_path);
 
 private:
     QApplication app_;
