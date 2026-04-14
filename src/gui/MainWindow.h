@@ -21,7 +21,7 @@ class QImage;
 class VideoPipeline;
 class HailoInference;
 class H264Encoder;
-class GstRtspServer;
+class RtspServer;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -73,12 +73,12 @@ private:
 
     // ── RTSP 송출 ────────────────────────────────────────────────────────
     // 표시 중인 (검출 박스가 그려진) 프레임을 H.264 로 인코딩한 뒤
-    // gst-rtsp-server 기반 GstRtspServer 를 통해 RTP 로 송출한다.
+    // 자체 구현 RtspServer (POSIX 소켓 기반) 를 통해 RTP 로 송출한다.
     //
     // 첫 프레임이 들어와 해상도/fps 가 확정될 때 lazy-init 한다.
     // 소멸 순서가 중요: encoder_ 가 server_ 를 콜백으로 참조하므로
     // 선언 순서를 [server_, encoder_] 로 두어 encoder_ 가 먼저 파괴되게 한다.
-    std::unique_ptr<GstRtspServer> rtspServer_;
+    std::unique_ptr<RtspServer>    rtspServer_;
     std::unique_ptr<H264Encoder>   encoder_;
     bool streamingInit_ = false;
 };

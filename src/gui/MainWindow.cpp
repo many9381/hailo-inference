@@ -15,7 +15,7 @@
 #include "Visualizer.h"
 #include "gstreamer/H264Encoder.h"
 #include "gstreamer/VideoPipeline.h"
-#include "rtsp/GstRtspServer.h"
+#include "rtsp_native/RtspServer.h"
 
 MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWindow(parent) {
     this->setWindowTitle("Hailo Inference GUI");
@@ -159,20 +159,19 @@ void MainWindow::onFrameReady(const QImage& image) {
         // 컨테이너에 framerate 가 없으면) 30 fps 로 fallback.
         int fps = this->pipeline_ ? this->pipeline_->fps() : 0;
         if (fps <= 0) fps = 30;
-        this->rtspServer_ = std::make_unique<GstRtspServer>(
+        this->rtspServer_ = std::make_unique<RtspServer>(
             8554, "/stream", displayBgr.cols, displayBgr.rows, fps);
         if (!this->rtspServer_->start()) {
-            std::cerr << "GstRtspServer 시작 실패" << std::endl;
+            std::cerr << "RtspServer 시작 실패" << std::endl;
             this->rtspServer_.reset();
         } else {
             this->encoder_ = std::make_unique<H264Encoder>(
                 displayBgr.cols, displayBgr.rows, fps);
             // NAL 콜백: 인코더가 만드는 access unit(byte-stream, Annex-B start
-            // code 포함, 여러 NAL 이 연속) 을 그대로 GstRtspServer 에 전달한다.
-            // GstRtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
-            // 분할 없이 통째로 넘겨야 appsrc → h264parse → rtph264pay 가
-            // access unit 경계를 정확히 인식한다.
-            GstRtspServer* serverPtr = this->rtspServer_.get();
+            // code 포함, 여러 NAL 이 연속) 을 그대로 RtspServer 에 전달한다.
+            // RtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로 내부에서
+            // NAL 단위로 쪼개어 RFC 6184 packetization-mode 1 로 송신한다.
+            RtspServer* serverPtr = this->rtspServer_.get();
             this->encoder_->setNalCallback(
                 [serverPtr](const uint8_t* data, size_t size) {
                     serverPtr->sendNal(data, size);
