@@ -1,10 +1,11 @@
-# RtspServer 는 server 전용, RtspClient 는 client 전용
+# client 역할: RTSP 수신
+target_sources(hailo_common PRIVATE
+    RtspClient.cpp
+    RtspClient.h
+)
+
+# server 역할: RTSP 송출
 target_sources(hailo_server PRIVATE
     RtspServer.cpp
     RtspServer.h
-)
-
-target_sources(hailo_client PRIVATE
-    RtspClient.cpp
-    RtspClient.h
 )

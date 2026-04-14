@@ -1,4 +1,7 @@
-# ── server 소스 ───────────────────────────────────────────────────────────────
+# 진입점은 양쪽 실행 파일에 동일하게 컴파일된다.
+target_sources(hailo_client PRIVATE main.cpp)
+
+# server 전용: Hailo 추론 관련 코드
 target_sources(hailo_server PRIVATE
     main.cpp
     Preprocessor.cpp
@@ -11,13 +14,6 @@ target_sources(hailo_server PRIVATE
     HailoInference.h
     YoloTypes.h
 )
-target_compile_definitions(hailo_server PRIVATE BUILD_SERVER)
-
-# ── client 소스 ───────────────────────────────────────────────────────────────
-target_sources(hailo_client PRIVATE
-    main.cpp
-)
-target_compile_definitions(hailo_client PRIVATE BUILD_CLIENT)
 
 add_subdirectory(gui)
 add_subdirectory(gstreamer)

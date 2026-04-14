@@ -29,42 +29,36 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-video-1.0
 )
 
-# ── server 실행 파일 ──────────────────────────────────────────────────────────
-# HailoRT (server 전용 — client 빌드 시에는 탐색하지 않는다)
-find_package(HailoRT QUIET)
+# HailoRT 는 hailo_server 전용 (필수). 미설치 환경에서는 설정 단계에서 실패한다.
+find_package(HailoRT REQUIRED)
 
-add_executable(hailo_server)
+# ── 공통 정적 라이브러리 ──────────────────────────────────────────────────────
+# client 역할에 필요한 코드 + 공통 코드만 포함한다 (HailoRT 의존 없음).
+# server 전용 코드(ServerWindow, VideoPipeline, H264Encoder, RtspServer,
+# HailoInference, Preprocessor/PostProcessor/Visualizer)는 hailo_server
+# 실행 파일 타깃에 직접 target_sources 로 등록된다.
+add_library(hailo_common STATIC)
 
-target_include_directories(hailo_server PRIVATE
+target_include_directories(hailo_common PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(hailo_server PRIVATE
+target_link_libraries(hailo_common PUBLIC
     ${OpenCV_LIBS}
     ${QT_LIBS}
     PkgConfig::GST
 )
 
-if (HailoRT_FOUND)
-    target_link_libraries(hailo_server PRIVATE HailoRT::libhailort)
-    target_compile_definitions(hailo_server PRIVATE HAS_HAILORT)
-else()
-    message(WARNING "HailoRT not found — cannot build hailo_server")
-endif()
-
-# ── client 실행 파일 ──────────────────────────────────────────────────────────
+# ── client 실행 파일 ─────────────────────────────────────────────────────────
 add_executable(hailo_client)
+target_link_libraries(hailo_client PRIVATE hailo_common)
 
-target_include_directories(hailo_client PRIVATE
-    ${CMAKE_SOURCE_DIR}/src
-    ${OpenCV_INCLUDE_DIRS}
-)
-
-target_link_libraries(hailo_client PRIVATE
-    ${OpenCV_LIBS}
-    ${QT_LIBS}
-    PkgConfig::GST
+# ── server 실행 파일 (HailoRT 사용) ───────────────────────────────────────────
+add_executable(hailo_server)
+target_link_libraries(hailo_server PRIVATE
+    hailo_common
+    HailoRT::libhailort
 )
 
 add_subdirectory(src)
