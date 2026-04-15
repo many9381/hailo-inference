@@ -9,7 +9,10 @@
 #include <thread>
 #include <vector>
 
-#include "crypto/RtpCipher.h"
+#include <memory>
+
+#include "crypto/AriaCipher.h"
+#include "crypto/ICipher.h"
 
 // ----------------------------------------------------------------------------
 // RtspClient
@@ -82,5 +85,9 @@ private:
     bool                 fuInProgress_ = false;
 
     // ── RTP payload 복호화 ───────────────────────────────────────────────
-    RtpCipher cipher_{"hailo_secret_key"};
+    std::unique_ptr<ICipher> cipher_ = [] {
+        auto c = std::make_unique<AriaCipher>("hailo_secret_key");
+        c->setIv(std::string(16, '\0'));
+        return c;
+    }();
 };

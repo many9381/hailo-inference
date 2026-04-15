@@ -8,7 +8,10 @@
 #include <thread>
 #include <vector>
 
-#include "crypto/RtpCipher.h"
+#include <memory>
+
+#include "crypto/AriaCipher.h"
+#include "crypto/ICipher.h"
 
 // ----------------------------------------------------------------------------
 // RtspServer
@@ -114,5 +117,9 @@ private:
     uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
 
     // ── RTP payload 암호화 ───────────────────────────────────────────────
-    RtpCipher cipher_{"hailo_secret_key"};
+    std::unique_ptr<ICipher> cipher_ = [] {
+        auto c = std::make_unique<AriaCipher>("hailo_secret_key");
+        c->setIv(std::string(16, '\0'));
+        return c;
+    }();
 };

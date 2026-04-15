@@ -467,7 +467,7 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
     std::memcpy(packet + 12, payload, size);
-    this->cipher_.encrypt(packet + 12, size);
+    this->cipher_->encrypt(packet + 12, size);
     ++s.seq;
 
     ::sendto(s.udpFd, packet, 12 + size, 0,
