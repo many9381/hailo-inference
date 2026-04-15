@@ -8,6 +8,11 @@
 #include <thread>
 #include <vector>
 
+#include <memory>
+
+#include "crypto/AriaCipher.h"
+#include "crypto/ICipher.h"
+
 // ----------------------------------------------------------------------------
 // RtspServer
 //
@@ -80,6 +85,11 @@ private:
     std::string buildGenericOkResponse(int cseq, const std::string& sessionId);
     std::string buildErrorResponse(int cseq, int code, const std::string& reason);
 
+    // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
+    // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
+    bool sendEncrypted(int fd, const std::string& data);
+    bool recvEncrypted(int fd, std::string& data);
+
     // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
     // 한 NAL 을 Single-NAL-unit 또는 FU-A 모드로 여러 개의 RTP 패킷에 나눠 전송.
     void sendNalToSession(Session& s, uint32_t rtpTs,
@@ -110,4 +120,12 @@ private:
 
     // ── 전송 카운터 ──────────────────────────────────────────────────────
     uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
+
+    // ── RTP payload 암호화 ───────────────────────────────────────────────
+    std::unique_ptr<ICipher> cipher_ = [] {
+        auto c = std::make_unique<AriaCipher>();
+        c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
+        c->setIv(std::string(16, '\0'));
+        return c;
+    }();
 };

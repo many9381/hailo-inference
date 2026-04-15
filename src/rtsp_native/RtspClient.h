@@ -9,6 +9,11 @@
 #include <thread>
 #include <vector>
 
+#include <memory>
+
+#include "crypto/AriaCipher.h"
+#include "crypto/ICipher.h"
+
 // ----------------------------------------------------------------------------
 // RtspClient
 //
@@ -78,4 +83,12 @@ private:
     // FU-A 는 하나의 NAL 이 여러 RTP 패킷으로 나뉘어 오는 모드이므로 재조립 버퍼가 필요.
     std::vector<uint8_t> fuBuffer_;
     bool                 fuInProgress_ = false;
+
+    // ── RTP payload 복호화 ───────────────────────────────────────────────
+    std::unique_ptr<ICipher> cipher_ = [] {
+        auto c = std::make_unique<AriaCipher>();
+        c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
+        c->setIv(std::string(16, '\0'));
+        return c;
+    }();
 };

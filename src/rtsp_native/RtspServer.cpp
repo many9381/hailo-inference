@@ -160,12 +160,58 @@ void RtspServer::acceptLoop() {
 }
 
 // ============================================================================
-// sessionLoop — RTSP 요청 수신 및 처리
+// sendEncrypted — RTSP 메시지를 암호화하여 길이 프리픽스와 함께 전송
+// 프레이밍: [4-byte network-order length][encrypted payload]
+// ============================================================================
+bool RtspServer::sendEncrypted(int fd, const std::string& data) {
+    std::vector<uint8_t> buf(data.begin(), data.end());
+    this->cipher_->encrypt(buf.data(), buf.size());
+
+    uint32_t netLen = htonl(static_cast<uint32_t>(buf.size()));
+    if (::send(fd, &netLen, 4, 0) != 4) return false;
+
+    size_t sent = 0;
+    while (sent < buf.size()) {
+        ssize_t n = ::send(fd, buf.data() + sent, buf.size() - sent, 0);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// ============================================================================
+// recvEncrypted — 길이 프리픽스 기반으로 암호화된 RTSP 메시지 수신 및 복호화
+// ============================================================================
+bool RtspServer::recvEncrypted(int fd, std::string& data) {
+    uint32_t netLen = 0;
+    size_t received = 0;
+    while (received < 4) {
+        ssize_t n = ::recv(fd, reinterpret_cast<char*>(&netLen) + received,
+                           4 - received, 0);
+        if (n <= 0) return false;
+        received += static_cast<size_t>(n);
+    }
+
+    uint32_t len = ntohl(netLen);
+    if (len == 0 || len > 65536) return false;
+
+    std::vector<uint8_t> buf(len);
+    received = 0;
+    while (received < len) {
+        ssize_t n = ::recv(fd, buf.data() + received, len - received, 0);
+        if (n <= 0) return false;
+        received += static_cast<size_t>(n);
+    }
+
+    this->cipher_->decrypt(buf.data(), buf.size());
+    data.assign(buf.begin(), buf.end());
+    return true;
+}
+
+// ============================================================================
+// sessionLoop — RTSP 요청 수신 및 처리 (암호화 프레이밍)
 // ============================================================================
 void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
-    std::string buffer;
-    char chunk[2048];
-
     while (this->running_.load() && session->alive.load()) {
         pollfd pfd{};
         pfd.fd     = session->tcpFd;
@@ -173,19 +219,11 @@ void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
         int ret = ::poll(&pfd, 1, 500);
         if (ret <= 0) continue;
 
-        ssize_t n = ::recv(session->tcpFd, chunk, sizeof(chunk), 0);
-        if (n <= 0) break;
-        buffer.append(chunk, chunk + n);
-
-        // 완전한 요청(\r\n\r\n) 이 들어올 때까지 누적
-        size_t pos;
-        while ((pos = buffer.find("\r\n\r\n")) != std::string::npos) {
-            std::string req = buffer.substr(0, pos + 4);
-            buffer.erase(0, pos + 4);
-            if (!this->handleRequest(*session, req)) {
-                session->alive.store(false);
-                break;
-            }
+        std::string req;
+        if (!this->recvEncrypted(session->tcpFd, req)) break;
+        if (!this->handleRequest(*session, req)) {
+            session->alive.store(false);
+            break;
         }
     }
 
@@ -266,14 +304,13 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
         response = this->buildPlayResponse(cseq, s.id);
     } else if (req.compare(0, 8, "TEARDOWN") == 0) {
         response = this->buildTeardownResponse(cseq, s.id);
-        ::send(s.tcpFd, response.data(), response.size(), 0);
+        this->sendEncrypted(s.tcpFd, response);
         return false;  // 세션 종료
     } else {
         response = this->buildGenericOkResponse(cseq, s.id);
     }
 
-    ssize_t sent = ::send(s.tcpFd, response.data(), response.size(), 0);
-    return sent >= 0;
+    return this->sendEncrypted(s.tcpFd, response);
 }
 
 // ============================================================================
@@ -467,6 +504,7 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
     std::memcpy(packet + 12, payload, size);
+    this->cipher_->encrypt(packet + 12, size);
     ++s.seq;
 
     ::sendto(s.udpFd, packet, 12 + size, 0,

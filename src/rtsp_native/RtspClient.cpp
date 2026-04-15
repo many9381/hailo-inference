@@ -185,45 +185,63 @@ bool RtspClient::bindRtpSocket() {
 // sendRequest — 한 개의 RTSP 요청을 보내고 응답을 한 메시지까지 수신
 // ============================================================================
 bool RtspClient::sendRequest(const std::string& req, std::string* response) {
-    if (::send(this->controlFd_, req.data(), req.size(), 0) < 0) {
-        qWarning() << "[RtspClient] send 실패:" << std::strerror(errno);
+    // ── 암호화하여 길이 프리픽스와 함께 전송 ────────────────────────────
+    std::vector<uint8_t> encBuf(req.begin(), req.end());
+    this->cipher_->encrypt(encBuf.data(), encBuf.size());
+
+    uint32_t netLen = htonl(static_cast<uint32_t>(encBuf.size()));
+    if (::send(this->controlFd_, &netLen, 4, 0) != 4) {
+        qWarning() << "[RtspClient] send length 실패";
         return false;
     }
-
-    // 응답을 "\r\n\r\n" 까지 수신. Content-Length 가 있으면 그만큼 더 읽는다.
-    std::string buffer;
-    char        chunk[2048];
-    size_t      headerEnd = std::string::npos;
-    while (true) {
-        ssize_t n = ::recv(this->controlFd_, chunk, sizeof(chunk), 0);
-        if (n <= 0) {
-            qWarning() << "[RtspClient] recv 실패:" << std::strerror(errno);
-            return false;
-        }
-        buffer.append(chunk, chunk + n);
-        headerEnd = buffer.find("\r\n\r\n");
-        if (headerEnd != std::string::npos) break;
-    }
-
-    // Content-Length 추출 (있으면 본문까지 다 받는다).
-    size_t contentLen = 0;
     {
-        std::string lower = buffer.substr(0, headerEnd);
-        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        size_t p = lower.find("content-length:");
-        if (p != std::string::npos) {
-            contentLen = static_cast<size_t>(std::atoi(lower.c_str() + p + 15));
+        size_t sent = 0;
+        while (sent < encBuf.size()) {
+            ssize_t n = ::send(this->controlFd_, encBuf.data() + sent,
+                               encBuf.size() - sent, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] send 실패:" << std::strerror(errno);
+                return false;
+            }
+            sent += static_cast<size_t>(n);
         }
     }
 
-    size_t totalNeeded = headerEnd + 4 + contentLen;
-    while (buffer.size() < totalNeeded) {
-        ssize_t n = ::recv(this->controlFd_, chunk, sizeof(chunk), 0);
-        if (n <= 0) return false;
-        buffer.append(chunk, chunk + n);
+    // ── 길이 프리픽스 기반으로 암호화된 응답 수신 ────────────────────────
+    uint32_t respNetLen = 0;
+    {
+        size_t received = 0;
+        while (received < 4) {
+            ssize_t n = ::recv(this->controlFd_,
+                               reinterpret_cast<char*>(&respNetLen) + received,
+                               4 - received, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] recv length 실패";
+                return false;
+            }
+            received += static_cast<size_t>(n);
+        }
     }
 
-    *response = buffer;
+    uint32_t respLen = ntohl(respNetLen);
+    if (respLen == 0 || respLen > 65536) return false;
+
+    std::vector<uint8_t> respBuf(respLen);
+    {
+        size_t received = 0;
+        while (received < respLen) {
+            ssize_t n = ::recv(this->controlFd_, respBuf.data() + received,
+                               respLen - received, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] recv 실패:" << std::strerror(errno);
+                return false;
+            }
+            received += static_cast<size_t>(n);
+        }
+    }
+
+    this->cipher_->decrypt(respBuf.data(), respBuf.size());
+    response->assign(respBuf.begin(), respBuf.end());
     return true;
 }
 
@@ -350,9 +368,10 @@ void RtspClient::rtpLoop() {
             if (static_cast<size_t>(n) < headerLen) continue;
         }
 
-        const uint8_t* payload = buf + headerLen;
-        size_t         payloadSize = static_cast<size_t>(n) - headerLen;
+        uint8_t* payload = buf + headerLen;
+        size_t   payloadSize = static_cast<size_t>(n) - headerLen;
         if (payloadSize == 0) continue;
+        this->cipher_->decrypt(payload, payloadSize);
         this->handleRtpPayload(payload, payloadSize);
     }
 }

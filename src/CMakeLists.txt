@@ -15,6 +15,7 @@ target_sources(hailo_server PRIVATE
     YoloTypes.h
 )
 
+add_subdirectory(crypto)
 add_subdirectory(gui)
 add_subdirectory(gstreamer)
 add_subdirectory(rtsp_native)
