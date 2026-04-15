@@ -1,4 +1,4 @@
-target_sources(hailo_yolo_inference PRIVATE
+target_sources(hailo_server PRIVATE
     GstRtspServer.cpp
     GstRtspServer.h
     GstRtspClient.cpp

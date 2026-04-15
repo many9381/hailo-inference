@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+#include "ServerWindow.h"
 
 #include <QImage>
 #include <QLabel>
@@ -15,13 +15,16 @@
 #include "Visualizer.h"
 #include "gstreamer/H264Encoder.h"
 #include "gstreamer/VideoPipeline.h"
-#include "rtsp/GstRtspServer.h"
+#include "rtsp_native/RtspServer.h"
 
-MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWindow(parent) {
+ServerWindow::ServerWindow(const std::string& hef_path,
+                           int rtsp_port, const std::string& rtsp_path,
+                           QWidget* parent)
+    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
     this->setWindowTitle("Hailo Inference GUI");
     this->resize(960, 720);
 
-    // this가 부모 → MainWindow 소멸 시 자동 delete
+    // this가 부모 → ServerWindow 소멸 시 자동 delete
     this->central_ = new QWidget(this);
 
     // central_이 부모 → 소멸 시 자동 delete
@@ -47,16 +50,16 @@ MainWindow::MainWindow(const std::string& hef_path, QWidget* parent) : QMainWind
 
     // 추론 엔진이 준비된 경우에만 워커 스레드를 가동.
     if (this->inference_) {
-        this->worker_ = std::thread(&MainWindow::inferenceLoop, this);
+        this->worker_ = std::thread(&ServerWindow::inferenceLoop, this);
     }
 
-    // this가 부모 → MainWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
+    // this가 부모 → ServerWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
     this->pipeline_ = new VideoPipeline(this);
     connect(this->pipeline_, &VideoPipeline::frameReady,
-            this, &MainWindow::onFrameReady);
+            this, &ServerWindow::onFrameReady);
 }
 
-MainWindow::~MainWindow() {
+ServerWindow::~ServerWindow() {
     // 더 이상 새 프레임이 들어오지 않도록 파이프라인을 먼저 정지.
     if (this->pipeline_) {
         this->pipeline_->stop();
@@ -72,13 +75,13 @@ MainWindow::~MainWindow() {
     }
 }
 
-void MainWindow::playVideo(const QString& filepath) {
+void ServerWindow::playVideo(const QString& filepath) {
     if (!this->pipeline_->start(filepath.toStdString())) {
         this->videoLabel_->setText("비디오 재생 실패: " + filepath);
     }
 }
 
-void MainWindow::inferenceLoop() {
+void ServerWindow::inferenceLoop() {
     while (true) {
         cv::Mat frame;
         {
@@ -120,7 +123,7 @@ void MainWindow::inferenceLoop() {
     }
 }
 
-void MainWindow::onFrameReady(const QImage& image) {
+void ServerWindow::onFrameReady(const QImage& image) {
     // QImage(RGB888) → cv::Mat(BGR) 변환. cvtColor가 새 버퍼를 할당하므로
     // 결과 bgr Mat은 QImage 수명과 독립적이다 (cv::Mat refcount로 관리됨).
     QImage rgb = image.convertToFormat(QImage::Format_RGB888);
@@ -159,20 +162,21 @@ void MainWindow::onFrameReady(const QImage& image) {
         // 컨테이너에 framerate 가 없으면) 30 fps 로 fallback.
         int fps = this->pipeline_ ? this->pipeline_->fps() : 0;
         if (fps <= 0) fps = 30;
-        this->rtspServer_ = std::make_unique<GstRtspServer>(
-            8554, "/stream", displayBgr.cols, displayBgr.rows, fps);
+        this->rtspServer_ = std::make_unique<RtspServer>(
+            this->rtspPort_, this->rtspPath_,
+            displayBgr.cols, displayBgr.rows, fps);
         if (!this->rtspServer_->start()) {
-            std::cerr << "GstRtspServer 시작 실패" << std::endl;
+            std::cerr << "RtspServer 시작 실패" << std::endl;
             this->rtspServer_.reset();
         } else {
             this->encoder_ = std::make_unique<H264Encoder>(
                 displayBgr.cols, displayBgr.rows, fps);
             // NAL 콜백: 인코더가 만드는 access unit(byte-stream, Annex-B start
-            // code 포함, 여러 NAL 이 연속) 을 그대로 GstRtspServer 에 전달한다.
-            // GstRtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
+            // code 포함, 여러 NAL 이 연속) 을 그대로 RtspServer 에 전달한다.
+            // RtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
             // 분할 없이 통째로 넘겨야 appsrc → h264parse → rtph264pay 가
             // access unit 경계를 정확히 인식한다.
-            GstRtspServer* serverPtr = this->rtspServer_.get();
+            RtspServer* serverPtr = this->rtspServer_.get();
             this->encoder_->setNalCallback(
                 [serverPtr](const uint8_t* data, size_t size) {
                     serverPtr->sendNal(data, size);
@@ -182,7 +186,8 @@ void MainWindow::onFrameReady(const QImage& image) {
                 this->encoder_.reset();
                 this->rtspServer_.reset();
             } else {
-                std::cout << "RTSP 송출 시작: rtsp://<host>:8554/stream"
+                std::cout << "RTSP 송출 시작: rtsp://<host>:"
+                          << this->rtspPort_ << this->rtspPath_
                           << std::endl;
             }
         }
