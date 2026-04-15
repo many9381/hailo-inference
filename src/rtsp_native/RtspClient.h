@@ -9,6 +9,8 @@
 #include <thread>
 #include <vector>
 
+#include "crypto/RtpCipher.h"
+
 // ----------------------------------------------------------------------------
 // RtspClient
 //
@@ -78,4 +80,7 @@ private:
     // FU-A 는 하나의 NAL 이 여러 RTP 패킷으로 나뉘어 오는 모드이므로 재조립 버퍼가 필요.
     std::vector<uint8_t> fuBuffer_;
     bool                 fuInProgress_ = false;
+
+    // ── RTP payload 복호화 ───────────────────────────────────────────────
+    RtpCipher cipher_{"hailo_secret_key"};
 };

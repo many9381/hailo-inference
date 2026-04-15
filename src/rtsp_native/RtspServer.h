@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+#include "crypto/RtpCipher.h"
+
 // ----------------------------------------------------------------------------
 // RtspServer
 //
@@ -110,4 +112,7 @@ private:
 
     // ── 전송 카운터 ──────────────────────────────────────────────────────
     uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
+
+    // ── RTP payload 암호화 ───────────────────────────────────────────────
+    RtpCipher cipher_{"hailo_secret_key"};
 };

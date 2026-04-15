@@ -350,9 +350,10 @@ void RtspClient::rtpLoop() {
             if (static_cast<size_t>(n) < headerLen) continue;
         }
 
-        const uint8_t* payload = buf + headerLen;
-        size_t         payloadSize = static_cast<size_t>(n) - headerLen;
+        uint8_t* payload = buf + headerLen;
+        size_t   payloadSize = static_cast<size_t>(n) - headerLen;
         if (payloadSize == 0) continue;
+        this->cipher_.decrypt(payload, payloadSize);
         this->handleRtpPayload(payload, payloadSize);
     }
 }
