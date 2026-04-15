@@ -29,8 +29,8 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-video-1.0
 )
 
-# HailoRT 는 hailo_server 전용 (필수). 미설치 환경에서는 설정 단계에서 실패한다.
-find_package(HailoRT REQUIRED)
+# HailoRT 는 hailo_server 전용. 미설치 환경에서는 server 빌드를 건너뛴다.
+find_package(HailoRT QUIET)
 
 # ── 공통 정적 라이브러리 ──────────────────────────────────────────────────────
 # client 역할에 필요한 코드 + 공통 코드만 포함한다 (HailoRT 의존 없음).
@@ -55,10 +55,16 @@ add_executable(hailo_client)
 target_link_libraries(hailo_client PRIVATE hailo_common)
 
 # ── server 실행 파일 (HailoRT 사용) ───────────────────────────────────────────
-add_executable(hailo_server)
-target_link_libraries(hailo_server PRIVATE
-    hailo_common
-    HailoRT::libhailort
-)
+if (HailoRT_FOUND)
+    add_executable(hailo_server)
+    target_link_libraries(hailo_server PRIVATE
+        hailo_common
+        HailoRT::libhailort
+    )
+else()
+    message(WARNING "HailoRT not found — hailo_server will not be built")
+    add_executable(hailo_server EXCLUDE_FROM_ALL)
+    target_link_libraries(hailo_server PRIVATE hailo_common)
+endif()
 
 add_subdirectory(src)
