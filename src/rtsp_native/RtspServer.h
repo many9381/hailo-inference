@@ -85,6 +85,11 @@ private:
     std::string buildGenericOkResponse(int cseq, const std::string& sessionId);
     std::string buildErrorResponse(int cseq, int code, const std::string& reason);
 
+    // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
+    // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
+    bool sendEncrypted(int fd, const std::string& data);
+    bool recvEncrypted(int fd, std::string& data);
+
     // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
     // 한 NAL 을 Single-NAL-unit 또는 FU-A 모드로 여러 개의 RTP 패킷에 나눠 전송.
     void sendNalToSession(Session& s, uint32_t rtpTs,
