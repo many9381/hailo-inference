@@ -17,19 +17,19 @@ class ICipher {
 public:
     virtual ~ICipher() = default;
 
-    // key 설정
-    virtual void setKey(const std::string& key) = 0;
-    virtual void setKey(const std::vector<uint8_t>& key) = 0;
+    // key 설정 — 알고리즘이 요구하는 크기와 다르면 false 를 반환하고 키를 등록하지 않는다.
+    virtual bool setKey(const std::string& key) = 0;
+    virtual bool setKey(const std::vector<uint8_t>& key) = 0;
 
-    // IV(Initialization Vector) 설정
-    virtual void setIv(const std::string& iv) = 0;
-    virtual void setIv(const std::vector<uint8_t>& iv) = 0;
+    // IV 설정 — 알고리즘이 요구하는 크기와 다르면 false 를 반환하고 IV 를 등록하지 않는다.
+    virtual bool setIv(const std::string& iv) = 0;
+    virtual bool setIv(const std::vector<uint8_t>& iv) = 0;
 
-    // in-place 암호화
-    virtual void encrypt(uint8_t* data, size_t size) const = 0;
+    // in-place 암호화 — 키/IV 가 미설정이면 false 를 반환한다.
+    virtual bool encrypt(uint8_t* data, size_t size) const = 0;
 
-    // in-place 복호화
-    virtual void decrypt(uint8_t* data, size_t size) const = 0;
+    // in-place 복호화 — 키/IV 가 미설정이면 false 를 반환한다.
+    virtual bool decrypt(uint8_t* data, size_t size) const = 0;
 
     // 키가 설정되어 있는지 여부
     virtual bool hasKey() const = 0;

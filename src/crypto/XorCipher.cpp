@@ -1,33 +1,39 @@
 #include "XorCipher.h"
 
-XorCipher::XorCipher(const std::string& key)
-    : key_(key.begin(), key.end()) {}
-
-XorCipher::XorCipher(const std::vector<uint8_t>& key)
-    : key_(key) {}
-
-void XorCipher::setKey(const std::string& key) {
+bool XorCipher::setKey(const std::string& key) {
+    if (key.empty()) return false;
     key_.assign(key.begin(), key.end());
+    return true;
 }
 
-void XorCipher::setKey(const std::vector<uint8_t>& key) {
+bool XorCipher::setKey(const std::vector<uint8_t>& key) {
+    if (key.empty()) return false;
     key_ = key;
+    return true;
 }
 
-void XorCipher::setIv(const std::string& iv) {
+bool XorCipher::setIv(const std::string& iv) {
+    if (iv.empty()) return false;
     iv_.assign(iv.begin(), iv.end());
+    return true;
 }
 
-void XorCipher::setIv(const std::vector<uint8_t>& iv) {
+bool XorCipher::setIv(const std::vector<uint8_t>& iv) {
+    if (iv.empty()) return false;
     iv_ = iv;
+    return true;
 }
 
-void XorCipher::encrypt(uint8_t* data, size_t size) const {
+bool XorCipher::encrypt(uint8_t* data, size_t size) const {
+    if (key_.empty()) return false;
     this->xorTransform(data, size);
+    return true;
 }
 
-void XorCipher::decrypt(uint8_t* data, size_t size) const {
+bool XorCipher::decrypt(uint8_t* data, size_t size) const {
+    if (key_.empty()) return false;
     this->xorTransform(data, size);
+    return true;
 }
 
 void XorCipher::xorTransform(uint8_t* data, size_t size) const {

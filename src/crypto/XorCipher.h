@@ -20,17 +20,16 @@
 class XorCipher : public ICipher {
 public:
     XorCipher() = default;
-    explicit XorCipher(const std::string& key);
-    explicit XorCipher(const std::vector<uint8_t>& key);
 
-    void setKey(const std::string& key) override;
-    void setKey(const std::vector<uint8_t>& key) override;
+    // XOR 은 키/IV 크기 제약 없음 — 비어 있지 않으면 성공.
+    bool setKey(const std::string& key) override;
+    bool setKey(const std::vector<uint8_t>& key) override;
 
-    void setIv(const std::string& iv) override;
-    void setIv(const std::vector<uint8_t>& iv) override;
+    bool setIv(const std::string& iv) override;
+    bool setIv(const std::vector<uint8_t>& iv) override;
 
-    void encrypt(uint8_t* data, size_t size) const override;
-    void decrypt(uint8_t* data, size_t size) const override;
+    bool encrypt(uint8_t* data, size_t size) const override;
+    bool decrypt(uint8_t* data, size_t size) const override;
 
     bool hasKey() const override { return !key_.empty(); }
 

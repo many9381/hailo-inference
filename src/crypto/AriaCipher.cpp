@@ -306,42 +306,39 @@ void incrementCounter(uint8_t* ctr) {
 // AriaCipher 공개 인터페이스
 // ============================================================================
 
-AriaCipher::AriaCipher(const std::string& key)
-    : key_(key.begin(), key.end()) {
-    initKey();
+bool AriaCipher::setKey(const std::string& key) {
+    return setKey(std::vector<uint8_t>(key.begin(), key.end()));
 }
 
-AriaCipher::AriaCipher(const std::vector<uint8_t>& key)
-    : key_(key) {
-    initKey();
-}
-
-void AriaCipher::setKey(const std::string& key) {
-    key_.assign(key.begin(), key.end());
-    initKey();
-}
-
-void AriaCipher::setKey(const std::vector<uint8_t>& key) {
+bool AriaCipher::setKey(const std::vector<uint8_t>& key) {
+    if (key.size() != 16 && key.size() != 24 && key.size() != 32)
+        return false;
     key_ = key;
     initKey();
+    return true;
 }
 
-void AriaCipher::setIv(const std::string& iv) {
-    iv_.assign(iv.begin(), iv.end());
-    iv_.resize(kBlockSize, 0);
+bool AriaCipher::setIv(const std::string& iv) {
+    return setIv(std::vector<uint8_t>(iv.begin(), iv.end()));
 }
 
-void AriaCipher::setIv(const std::vector<uint8_t>& iv) {
+bool AriaCipher::setIv(const std::vector<uint8_t>& iv) {
+    if (iv.size() != kBlockSize)
+        return false;
     iv_ = iv;
-    iv_.resize(kBlockSize, 0);
+    return true;
 }
 
-void AriaCipher::encrypt(uint8_t* data, size_t size) const {
+bool AriaCipher::encrypt(uint8_t* data, size_t size) const {
+    if (!keyInitialized_ || iv_.empty()) return false;
     ctrTransform(data, size);
+    return true;
 }
 
-void AriaCipher::decrypt(uint8_t* data, size_t size) const {
+bool AriaCipher::decrypt(uint8_t* data, size_t size) const {
+    if (!keyInitialized_ || iv_.empty()) return false;
     ctrTransform(data, size);
+    return true;
 }
 
 // ============================================================================
@@ -349,24 +346,8 @@ void AriaCipher::decrypt(uint8_t* data, size_t size) const {
 // ============================================================================
 
 void AriaCipher::initKey() {
-    if (key_.empty()) {
-        keyInitialized_ = false;
-        return;
-    }
-
-    // 키 길이를 16/24/32 바이트로 맞춤
-    int keyBits;
-    if (key_.size() <= 16) {
-        key_.resize(16, 0);
-        keyBits = 128;
-    } else if (key_.size() <= 24) {
-        key_.resize(24, 0);
-        keyBits = 192;
-    } else {
-        key_.resize(32, 0);
-        keyBits = 256;
-    }
-
+    // setKey() 에서 크기 검증을 마쳤으므로 16/24/32 중 하나이다.
+    int keyBits = static_cast<int>(key_.size()) * 8;
     std::memset(&encKey_, 0, sizeof(encKey_));
     ariaSetEncryptKey(key_.data(), keyBits, encKey_);
     keyInitialized_ = true;

@@ -86,7 +86,8 @@ private:
 
     // ── RTP payload 복호화 ───────────────────────────────────────────────
     std::unique_ptr<ICipher> cipher_ = [] {
-        auto c = std::make_unique<AriaCipher>("hailo_secret_key");
+        auto c = std::make_unique<AriaCipher>();
+        c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
         c->setIv(std::string(16, '\0'));
         return c;
     }();

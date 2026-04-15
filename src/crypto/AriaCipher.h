@@ -35,18 +35,18 @@ public:
     };
 
     AriaCipher() = default;
-    explicit AriaCipher(const std::string& key);
-    explicit AriaCipher(const std::vector<uint8_t>& key);
 
-    void setKey(const std::string& key) override;
-    void setKey(const std::vector<uint8_t>& key) override;
+    // key 크기: 16(ARIA-128), 24(ARIA-192), 32(ARIA-256) 바이트만 허용.
+    bool setKey(const std::string& key) override;
+    bool setKey(const std::vector<uint8_t>& key) override;
 
-    void setIv(const std::string& iv) override;
-    void setIv(const std::vector<uint8_t>& iv) override;
+    // IV 크기: 정확히 16 바이트만 허용.
+    bool setIv(const std::string& iv) override;
+    bool setIv(const std::vector<uint8_t>& iv) override;
 
     // CTR 모드: encrypt == decrypt (동일 연산)
-    void encrypt(uint8_t* data, size_t size) const override;
-    void decrypt(uint8_t* data, size_t size) const override;
+    bool encrypt(uint8_t* data, size_t size) const override;
+    bool decrypt(uint8_t* data, size_t size) const override;
 
     bool hasKey() const override { return keyInitialized_; }
 
