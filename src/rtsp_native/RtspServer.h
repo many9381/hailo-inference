@@ -43,7 +43,8 @@
 // ----------------------------------------------------------------------------
 class RtspServer {
 public:
-    RtspServer(int port, std::string mountPoint, int width, int height, int fps);
+    RtspServer(int port, std::string mountPoint, int width, int height, int fps,
+               bool rtpTcp = false);
     ~RtspServer();
 
     RtspServer(const RtspServer&) = delete;
@@ -88,6 +89,7 @@ private:
     // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
     // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
     bool sendEncrypted(int fd, const std::string& data);
+    bool sendEncryptedLocked(Session& s, const std::string& data);
     bool recvEncrypted(int fd, std::string& data);
 
     // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
@@ -105,6 +107,7 @@ private:
     int         width_;   // SDP/로그 출력용
     int         height_;
     int         fps_;
+    bool        rtpTcp_;  // true: TCP interleaved, false: UDP
 
     // ── 소켓/스레드 ──────────────────────────────────────────────────────
     int               listenFd_ = -1;

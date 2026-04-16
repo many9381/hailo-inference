@@ -19,6 +19,7 @@ class ClientWindow : public QMainWindow {
 public:
     explicit ClientWindow(const std::string& serverIp,
                           int rtsp_port, const std::string& rtsp_path,
+                          bool rtp_tcp = false,
                           QWidget* parent = nullptr);
     ~ClientWindow() override;
 
@@ -43,6 +44,7 @@ private:
     // RTSP 연결 설정
     int         rtspPort_ = 8554;
     std::string rtspPath_ = "/stream";
+    bool        rtpTcp_   = false;
 
     // RTSP 수신 (native socket) + NAL 디코더 (GStreamer)
     RtspClient*         rtspClient_ = nullptr;

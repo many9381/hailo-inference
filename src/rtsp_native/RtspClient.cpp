@@ -20,7 +20,8 @@
 // ============================================================================
 // 생성자 / 소멸자
 // ============================================================================
-RtspClient::RtspClient(QObject* parent) : QObject(parent) {}
+RtspClient::RtspClient(bool rtpTcp, QObject* parent)
+    : QObject(parent), rtpTcp_(rtpTcp) {}
 
 RtspClient::~RtspClient() {
     this->stop();
@@ -39,15 +40,27 @@ bool RtspClient::start(const std::string& url) {
     this->baseUrl_ = url;
 
     if (!this->openControl()) return false;
-    if (!this->bindRtpSocket()) {
-        ::close(this->controlFd_);
-        this->controlFd_ = -1;
-        return false;
+    if (!this->rtpTcp_) {
+        if (!this->bindRtpSocket()) {
+            ::close(this->controlFd_);
+            this->controlFd_ = -1;
+            return false;
+        }
     }
     if (!this->performSignaling()) {
         if (this->rtpFd_     >= 0) { ::close(this->rtpFd_);     this->rtpFd_     = -1; }
         if (this->controlFd_ >= 0) { ::close(this->controlFd_); this->controlFd_ = -1; }
         return false;
+    }
+
+    // TCP 모드에서는 controlFd_ 에 recv timeout 을 제거하여
+    // interleaved RTP 수신이 블로킹되지 않도록 한다.
+    // (rtpLoop 종료는 running_ 플래그 + 소켓 close 로 처리)
+    if (this->rtpTcp_) {
+        timeval tv{};
+        tv.tv_sec  = 0;
+        tv.tv_usec = 0;  // 무한 대기
+        ::setsockopt(this->controlFd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }
 
     this->running_.store(true);
@@ -293,8 +306,12 @@ bool RtspClient::performSignaling() {
     // ── SETUP ────────────────────────────────────────────────────────────
     {
         std::ostringstream tr;
-        tr << "Transport: RTP/AVP;unicast;client_port="
-           << this->clientRtpPort_ << "-" << (this->clientRtpPort_ + 1) << "\r\n";
+        if (this->rtpTcp_) {
+            tr << "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n";
+        } else {
+            tr << "Transport: RTP/AVP;unicast;client_port="
+               << this->clientRtpPort_ << "-" << (this->clientRtpPort_ + 1) << "\r\n";
+        }
         std::string req = makeLine("SETUP", setupUrl, this->cseq_++, "", tr.str());
         if (!this->sendRequest(req, &response)) return false;
         if (response.find("RTSP/1.0 200") == std::string::npos) {
@@ -335,24 +352,52 @@ bool RtspClient::performSignaling() {
 }
 
 // ============================================================================
-// rtpLoop — UDP 패킷을 읽어 RTP 헤더를 벗기고 NAL 페이로드를 처리
+// recvFull — 지정한 바이트 수만큼 반드시 수신 (내부 헬퍼)
+// ============================================================================
+static bool recvFull(int fd, void* buf, size_t len) {
+    size_t received = 0;
+    while (received < len) {
+        ssize_t n = ::recv(fd, static_cast<char*>(buf) + received,
+                           len - received, 0);
+        if (n <= 0) return false;
+        received += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// ============================================================================
+// rtpLoop — RTP 패킷 수신 (UDP 또는 TCP interleaved)
 // ============================================================================
 void RtspClient::rtpLoop() {
     uint8_t buf[2048];
+
     while (this->running_.load()) {
-        ssize_t n = ::recv(this->rtpFd_, buf, sizeof(buf), 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            if (errno == EINTR) continue;
-            break;
+        ssize_t n;
+        size_t  rtpLen;
+
+        if (this->rtpTcp_) {
+            // TCP interleaved: $ + channel(1) + length(2) + RTP packet
+            uint8_t header[4];
+            if (!recvFull(this->controlFd_, header, 4)) break;
+            if (header[0] != '$') break;  // 프로토콜 오류
+            // header[1] = channel (무시 — 단일 스트림)
+            rtpLen = (static_cast<size_t>(header[2]) << 8) | header[3];
+            if (rtpLen == 0 || rtpLen > sizeof(buf)) break;
+            if (!recvFull(this->controlFd_, buf, rtpLen)) break;
+            n = static_cast<ssize_t>(rtpLen);
+        } else {
+            // UDP
+            n = ::recv(this->rtpFd_, buf, sizeof(buf), 0);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                if (errno == EINTR) continue;
+                break;
+            }
         }
+
         if (n < 12) continue;  // RTP 헤더 최소 크기
 
         // RTP 헤더 파싱
-        //   byte 0: V(2) | P | X | CC(4)
-        //   byte 1: M    | PT(7)
-        //   CSRC list: 4 * CC bytes (skip)
-        //   extension header 가 있으면 X=1, 그 크기는 가변.
         uint8_t v0 = buf[0];
         int     cc = v0 & 0x0F;
         bool    x  = (v0 & 0x10) != 0;
@@ -360,7 +405,6 @@ void RtspClient::rtpLoop() {
         if (static_cast<size_t>(n) < headerLen) continue;
 
         if (x) {
-            // 확장 헤더: [profile(2)][length(2)] + length*4 bytes
             if (static_cast<size_t>(n) < headerLen + 4) continue;
             uint16_t extLen = (static_cast<uint16_t>(buf[headerLen + 2]) << 8) |
                               buf[headerLen + 3];

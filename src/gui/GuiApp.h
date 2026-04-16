@@ -23,7 +23,8 @@ public:
             const std::string& video_path,
             const std::string& server_ip,
             int rtsp_port,
-            const std::string& rtsp_path);
+            const std::string& rtsp_path,
+            bool rtp_tcp);
 
 private:
     QApplication app_;

@@ -16,7 +16,8 @@ int runServerRole(QApplication& /*app*/,
                   const std::string& /*hef_path*/,
                   const std::string& /*video_path*/,
                   int /*rtsp_port*/,
-                  const std::string& /*rtsp_path*/) {
+                  const std::string& /*rtsp_path*/,
+                  bool /*rtp_tcp*/) {
     std::cerr << "[GuiApp] 이 바이너리는 server 역할을 지원하지 않습니다 "
                  "(hailo_client 빌드). hailo_server 를 사용하세요."
               << std::endl;
@@ -30,14 +31,16 @@ int GuiApp::run(const std::string& role,
                 const std::string& video_path,
                 const std::string& server_ip,
                 int rtsp_port,
-                const std::string& rtsp_path) {
+                const std::string& rtsp_path,
+                bool rtp_tcp) {
     if (role == "server") {
-        return runServerRole(this->app_, hef_path, video_path, rtsp_port, rtsp_path);
+        return runServerRole(this->app_, hef_path, video_path,
+                             rtsp_port, rtsp_path, rtp_tcp);
     }
 
     if (role == "client") {
         // 클라이언트 모드: RTSP 수신/디코드를 담당.
-        ClientWindow window(server_ip, rtsp_port, rtsp_path);
+        ClientWindow window(server_ip, rtsp_port, rtsp_path, rtp_tcp);
         window.show();
         return this->app_.exec();
     }

@@ -10,8 +10,9 @@
 
 ClientWindow::ClientWindow(const std::string& serverIp,
                            int rtsp_port, const std::string& rtsp_path,
-                           QWidget* parent)
-    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
+                           bool rtp_tcp, QWidget* parent)
+    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path),
+      rtpTcp_(rtp_tcp) {
     this->setWindowTitle("Hailo RTSP Client");
     this->resize(960, 720);
 
@@ -51,7 +52,7 @@ ClientWindow::ClientWindow(const std::string& serverIp,
     this->setCentralWidget(this->central_);
 
     // ── RTSP 클라이언트 + NAL 디코더 (Qt parent-child → 소멸 시 자동 정리) ──
-    this->rtspClient_ = new RtspClient(this);
+    this->rtspClient_ = new RtspClient(this->rtpTcp_, this);
     this->decoder_    = new NalDecoderPipeline(this);
 
     // RtspClient::nalReceived → NalDecoderPipeline::pushNal

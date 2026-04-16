@@ -34,7 +34,7 @@ class RtspClient : public QObject {
     Q_OBJECT
 
 public:
-    explicit RtspClient(QObject* parent = nullptr);
+    explicit RtspClient(bool rtpTcp = false, QObject* parent = nullptr);
     ~RtspClient() override;
 
     RtspClient(const RtspClient&) = delete;
@@ -53,7 +53,7 @@ private:
     // ── URL/시그널링 헬퍼 ────────────────────────────────────────────────
     bool parseUrl(const std::string& url);
     bool openControl();
-    bool bindRtpSocket();                           // 클라이언트 RTP UDP 포트 할당
+    bool bindRtpSocket();                           // 클라이언트 RTP UDP 포트 할당 (UDP 전용)
     bool sendRequest(const std::string& req,
                      std::string* response);        // 한 요청을 보내고 응답 수신
     bool performSignaling();                        // OPTIONS → DESCRIBE → SETUP → PLAY
@@ -74,8 +74,9 @@ private:
 
     // ── 소켓 / 스레드 ────────────────────────────────────────────────────
     int               controlFd_ = -1;  // RTSP TCP 제어 소켓
-    int               rtpFd_     = -1;  // RTP UDP 소켓
+    int               rtpFd_     = -1;  // RTP UDP 소켓 (UDP 전용)
     uint16_t          clientRtpPort_ = 0;
+    bool              rtpTcp_    = false;  // TCP interleaved 전송 여부
     std::thread       rtpThread_;
     std::atomic<bool> running_{false};
 

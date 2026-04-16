@@ -20,12 +20,15 @@
 // ============================================================================
 struct RtspServer::Session {
     int              tcpFd     = -1;   // RTSP 제어 TCP 소켓
-    int              udpFd     = -1;   // RTP 송출 UDP 소켓
-    sockaddr_in      clientRtpAddr{};  // 클라이언트 RTP 수신 주소
+    int              udpFd     = -1;   // RTP 송출 UDP 소켓 (UDP 모드 전용)
+    sockaddr_in      clientRtpAddr{};  // 클라이언트 RTP 수신 주소 (UDP 모드 전용)
     std::string      id;               // Session ID
     uint16_t         seq       = 0;    // RTP sequence number
     uint32_t         ssrc      = 0;    // RTP SSRC
     bool             playing   = false;
+    bool             tcpTransport = false;  // TCP interleaved 전송 여부
+    uint8_t          rtpChannel   = 0;     // interleaved channel (보통 0)
+    std::mutex       writeMu;              // TCP 쓰기 직렬화 (RTSP 응답 + RTP 패킷)
     std::atomic<bool> alive{true};
 };
 
@@ -33,9 +36,9 @@ struct RtspServer::Session {
 // 생성자 / 소멸자
 // ============================================================================
 RtspServer::RtspServer(int port, std::string mountPoint,
-                       int width, int height, int fps)
+                       int width, int height, int fps, bool rtpTcp)
     : port_(port), mountPoint_(std::move(mountPoint)),
-      width_(width), height_(height), fps_(fps) {}
+      width_(width), height_(height), fps_(fps), rtpTcp_(rtpTcp) {}
 
 RtspServer::~RtspServer() {
     this->stop();
@@ -179,6 +182,15 @@ bool RtspServer::sendEncrypted(int fd, const std::string& data) {
     return true;
 }
 
+// TCP 세션 전용: writeMu 보호 하에 sendEncrypted 호출
+bool RtspServer::sendEncryptedLocked(Session& s, const std::string& data) {
+    if (s.tcpTransport) {
+        std::lock_guard<std::mutex> lock(s.writeMu);
+        return this->sendEncrypted(s.tcpFd, data);
+    }
+    return this->sendEncrypted(s.tcpFd, data);
+}
+
 // ============================================================================
 // recvEncrypted — 길이 프리픽스 기반으로 암호화된 RTSP 메시지 수신 및 복호화
 // ============================================================================
@@ -255,62 +267,73 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
         std::string uri = req.substr(sp + 1, ep - sp - 1);
         response = this->buildDescribeResponse(cseq, uri);
     } else if (req.compare(0, 5, "SETUP") == 0) {
-        // Transport 헤더에서 client_port 추출
+        // Transport 헤더 파싱
         std::string transport;
         size_t tp = req.find("Transport:");
         if (tp == std::string::npos) tp = req.find("transport:");
         if (tp != std::string::npos) {
             size_t eol = req.find("\r\n", tp);
             transport = req.substr(tp + 10, eol - tp - 10);
-            // 앞쪽 공백 제거
             size_t start = transport.find_first_not_of(" \t");
             if (start != std::string::npos) transport = transport.substr(start);
         }
 
-        // client_port 추출
-        uint16_t clientRtpPort = 0;
-        size_t cp = transport.find("client_port=");
-        if (cp != std::string::npos) {
-            clientRtpPort = static_cast<uint16_t>(
-                std::atoi(transport.c_str() + cp + 12));
+        bool isTcpTransport = (transport.find("RTP/AVP/TCP") != std::string::npos);
+        s.tcpTransport = isTcpTransport;
+
+        if (isTcpTransport) {
+            // TCP interleaved: interleaved 채널 파싱
+            uint8_t ch = 0;
+            size_t ip = transport.find("interleaved=");
+            if (ip != std::string::npos) {
+                ch = static_cast<uint8_t>(std::atoi(transport.c_str() + ip + 12));
+            }
+            s.rtpChannel = ch;
+
+            response = this->buildSetupResponse(cseq, s.id, transport);
+        } else {
+            // UDP: client_port 추출 후 UDP 소켓 바인드
+            uint16_t clientRtpPort = 0;
+            size_t cp = transport.find("client_port=");
+            if (cp != std::string::npos) {
+                clientRtpPort = static_cast<uint16_t>(
+                    std::atoi(transport.c_str() + cp + 12));
+            }
+
+            sockaddr_in peerAddr{};
+            socklen_t   peerLen = sizeof(peerAddr);
+            ::getpeername(s.tcpFd, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
+
+            s.udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            s.clientRtpAddr.sin_family      = AF_INET;
+            s.clientRtpAddr.sin_addr        = peerAddr.sin_addr;
+            s.clientRtpAddr.sin_port        = htons(clientRtpPort);
+
+            sockaddr_in localAddr{};
+            localAddr.sin_family      = AF_INET;
+            localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+            localAddr.sin_port        = 0;
+            ::bind(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), sizeof(localAddr));
+            socklen_t localLen = sizeof(localAddr);
+            ::getsockname(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), &localLen);
+            uint16_t serverRtpPort = ntohs(localAddr.sin_port);
+
+            response = this->buildSetupResponse(cseq, s.id, transport +
+                ";server_port=" + std::to_string(serverRtpPort) + "-" +
+                std::to_string(serverRtpPort + 1));
         }
-
-        // 클라이언트 IP (TCP 소켓에서 추출)
-        sockaddr_in peerAddr{};
-        socklen_t   peerLen = sizeof(peerAddr);
-        ::getpeername(s.tcpFd, reinterpret_cast<sockaddr*>(&peerAddr), &peerLen);
-
-        // UDP 소켓 생성
-        s.udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
-        s.clientRtpAddr.sin_family      = AF_INET;
-        s.clientRtpAddr.sin_addr        = peerAddr.sin_addr;
-        s.clientRtpAddr.sin_port        = htons(clientRtpPort);
-
-        // server_port 를 알려주기 위해 바인드
-        sockaddr_in localAddr{};
-        localAddr.sin_family      = AF_INET;
-        localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-        localAddr.sin_port        = 0;
-        ::bind(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), sizeof(localAddr));
-        socklen_t localLen = sizeof(localAddr);
-        ::getsockname(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), &localLen);
-        uint16_t serverRtpPort = ntohs(localAddr.sin_port);
-
-        response = this->buildSetupResponse(cseq, s.id, transport +
-            ";server_port=" + std::to_string(serverRtpPort) + "-" +
-            std::to_string(serverRtpPort + 1));
     } else if (req.compare(0, 4, "PLAY") == 0) {
         s.playing = true;
         response = this->buildPlayResponse(cseq, s.id);
     } else if (req.compare(0, 8, "TEARDOWN") == 0) {
         response = this->buildTeardownResponse(cseq, s.id);
-        this->sendEncrypted(s.tcpFd, response);
+        this->sendEncryptedLocked(s, response);
         return false;  // 세션 종료
     } else {
         response = this->buildGenericOkResponse(cseq, s.id);
     }
 
-    return this->sendEncrypted(s.tcpFd, response);
+    return this->sendEncryptedLocked(s, response);
 }
 
 // ============================================================================
@@ -429,7 +452,8 @@ void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
 
     std::lock_guard<std::mutex> lock(this->sessionsMu_);
     for (auto& session : this->sessions_) {
-        if (!session->playing || session->udpFd < 0) continue;
+        if (!session->playing) continue;
+        if (!session->tcpTransport && session->udpFd < 0) continue;
         for (size_t n = 0; n < nals.size(); ++n) {
             this->sendNalToSession(*session, rtpTs,
                                    nals[n].first, nals[n].second,
@@ -507,7 +531,28 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     this->cipher_->encrypt(packet + 12, size);
     ++s.seq;
 
-    ::sendto(s.udpFd, packet, 12 + size, 0,
-             reinterpret_cast<const sockaddr*>(&s.clientRtpAddr),
-             sizeof(s.clientRtpAddr));
+    size_t totalLen = 12 + size;
+
+    if (s.tcpTransport) {
+        // TCP interleaved: $ + channel(1) + length(2, big-endian) + RTP packet
+        uint8_t header[4];
+        header[0] = '$';
+        header[1] = s.rtpChannel;
+        header[2] = static_cast<uint8_t>((totalLen >> 8) & 0xFF);
+        header[3] = static_cast<uint8_t>(totalLen & 0xFF);
+
+        std::lock_guard<std::mutex> lock(s.writeMu);
+        if (::send(s.tcpFd, header, 4, 0) != 4) return;
+        size_t sent = 0;
+        while (sent < totalLen) {
+            ssize_t n = ::send(s.tcpFd, packet + sent, totalLen - sent, 0);
+            if (n <= 0) return;
+            sent += static_cast<size_t>(n);
+        }
+    } else {
+        // UDP
+        ::sendto(s.udpFd, packet, totalLen, 0,
+                 reinterpret_cast<const sockaddr*>(&s.clientRtpAddr),
+                 sizeof(s.clientRtpAddr));
+    }
 }

@@ -31,6 +31,7 @@ public:
     // rtsp_port / rtsp_path: RTSP 서버 포트 및 스트림 경로.
     explicit ServerWindow(const std::string& hef_path,
                           int rtsp_port, const std::string& rtsp_path,
+                          bool rtp_tcp = false,
                           QWidget* parent = nullptr);
     ~ServerWindow() override;
 
@@ -83,6 +84,7 @@ private:
     // 선언 순서를 [server_, encoder_] 로 두어 encoder_ 가 먼저 파괴되게 한다.
     int         rtspPort_ = 8554;
     std::string rtspPath_ = "/stream";
+    bool        rtpTcp_   = false;
 
     std::unique_ptr<RtspServer> rtspServer_;
     std::unique_ptr<H264Encoder>   encoder_;

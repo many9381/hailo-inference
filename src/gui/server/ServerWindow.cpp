@@ -19,8 +19,9 @@
 
 ServerWindow::ServerWindow(const std::string& hef_path,
                            int rtsp_port, const std::string& rtsp_path,
-                           QWidget* parent)
-    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
+                           bool rtp_tcp, QWidget* parent)
+    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path),
+      rtpTcp_(rtp_tcp) {
     this->setWindowTitle("Hailo Inference GUI");
     this->resize(960, 720);
 
@@ -164,7 +165,8 @@ void ServerWindow::onFrameReady(const QImage& image) {
         if (fps <= 0) fps = 30;
         this->rtspServer_ = std::make_unique<RtspServer>(
             this->rtspPort_, this->rtspPath_,
-            displayBgr.cols, displayBgr.rows, fps);
+            displayBgr.cols, displayBgr.rows, fps,
+            this->rtpTcp_);
         if (!this->rtspServer_->start()) {
             std::cerr << "RtspServer 시작 실패" << std::endl;
             this->rtspServer_.reset();
