@@ -366,25 +366,30 @@ static bool recvFull(int fd, void* buf, size_t len) {
 }
 
 // ============================================================================
-// rtpLoop — RTP 패킷 수신 (UDP 또는 TCP interleaved)
+// rtpLoop — SRTP 패킷 수신 (UDP 또는 TCP interleaved)
+//
+// SRTP 패킷 구조:
+//   [RTP Header (12B)] [Encrypted Payload] [Auth Tag (10B)]
+//
+// 수신 후 인증 태그를 검증하고, 검증 성공 시 페이로드를 복호화한다.
 // ============================================================================
 void RtspClient::rtpLoop() {
     uint8_t buf[2048];
 
     while (this->running_.load()) {
         ssize_t n;
-        size_t  rtpLen;
+        size_t  srtpLen;
 
         if (this->rtpTcp_) {
-            // TCP interleaved: $ + channel(1) + length(2) + RTP packet
+            // TCP interleaved: $ + channel(1) + length(2) + SRTP packet
             uint8_t header[4];
             if (!recvFull(this->controlFd_, header, 4)) break;
             if (header[0] != '$') break;  // 프로토콜 오류
             // header[1] = channel (무시 — 단일 스트림)
-            rtpLen = (static_cast<size_t>(header[2]) << 8) | header[3];
-            if (rtpLen == 0 || rtpLen > sizeof(buf)) break;
-            if (!recvFull(this->controlFd_, buf, rtpLen)) break;
-            n = static_cast<ssize_t>(rtpLen);
+            srtpLen = (static_cast<size_t>(header[2]) << 8) | header[3];
+            if (srtpLen == 0 || srtpLen > sizeof(buf)) break;
+            if (!recvFull(this->controlFd_, buf, srtpLen)) break;
+            n = static_cast<ssize_t>(srtpLen);
         } else {
             // UDP
             n = ::recv(this->rtpFd_, buf, sizeof(buf), 0);
@@ -395,25 +400,41 @@ void RtspClient::rtpLoop() {
             }
         }
 
-        if (n < 12) continue;  // RTP 헤더 최소 크기
+        // SRTP 최소 크기: RTP 헤더(12) + 인증 태그(10)
+        if (static_cast<size_t>(n) < 12 + kSrtpAuthTagLen) continue;
 
-        // RTP 헤더 파싱
+        size_t pktLen = static_cast<size_t>(n);
+
+        // ── SRTP 인증 태그 검증 ──────────────────────────────────────────
+        size_t rtpLen = pktLen - kSrtpAuthTagLen;
+        const uint8_t* receivedTag = buf + rtpLen;
+
+        auto digest = HmacSha1::compute(
+            this->authKey_.data(), this->authKey_.size(),
+            buf, rtpLen);
+
+        if (std::memcmp(digest.data(), receivedTag, kSrtpAuthTagLen) != 0) {
+            qWarning() << "[RtspClient] SRTP 인증 태그 불일치 — 패킷 폐기";
+            continue;
+        }
+
+        // ── RTP 헤더 파싱 (인증 통과 후) ─────────────────────────────────
         uint8_t v0 = buf[0];
         int     cc = v0 & 0x0F;
         bool    x  = (v0 & 0x10) != 0;
         size_t  headerLen = 12 + static_cast<size_t>(cc) * 4;
-        if (static_cast<size_t>(n) < headerLen) continue;
+        if (rtpLen < headerLen) continue;
 
         if (x) {
-            if (static_cast<size_t>(n) < headerLen + 4) continue;
+            if (rtpLen < headerLen + 4) continue;
             uint16_t extLen = (static_cast<uint16_t>(buf[headerLen + 2]) << 8) |
                               buf[headerLen + 3];
             headerLen += 4 + static_cast<size_t>(extLen) * 4;
-            if (static_cast<size_t>(n) < headerLen) continue;
+            if (rtpLen < headerLen) continue;
         }
 
         uint8_t* payload = buf + headerLen;
-        size_t   payloadSize = static_cast<size_t>(n) - headerLen;
+        size_t   payloadSize = rtpLen - headerLen;
         if (payloadSize == 0) continue;
         this->cipher_->decrypt(payload, payloadSize);
         this->handleRtpPayload(payload, payloadSize);

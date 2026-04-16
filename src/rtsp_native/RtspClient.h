@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "crypto/AriaCipher.h"
+#include "crypto/HmacSha1.h"
 #include "crypto/ICipher.h"
 
 // ----------------------------------------------------------------------------
@@ -85,11 +86,19 @@ private:
     std::vector<uint8_t> fuBuffer_;
     bool                 fuInProgress_ = false;
 
-    // ── RTP payload 복호화 ───────────────────────────────────────────────
+    // ── SRTP 복호화 + 인증 검증 ────────────────────────────────────────
+    static constexpr size_t kSrtpAuthTagLen = 10;  // RFC 3711: 80-bit truncated HMAC-SHA1
+
     std::unique_ptr<ICipher> cipher_ = [] {
         auto c = std::make_unique<AriaCipher>();
         c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
         c->setIv(std::string(16, '\0'));
         return c;
+    }();
+
+    // HMAC-SHA1 인증 키 (SRTP 인증 태그 검증용)
+    const std::vector<uint8_t> authKey_ = [] {
+        std::string k = "hailo_srtp_auth!";  // 16 bytes
+        return std::vector<uint8_t>(k.begin(), k.end());
     }();
 };

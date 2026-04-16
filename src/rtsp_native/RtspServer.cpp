@@ -512,11 +512,16 @@ void RtspServer::sendNalToSession(Session& s, uint32_t rtpTs,
 }
 
 // ============================================================================
-// sendRtpPacket — RTP 헤더 + 페이로드 → UDP 송신
+// sendRtpPacket — SRTP 패킷 생성: RTP 헤더 + 암호화 페이로드 + 인증 태그
+//
+// SRTP 패킷 구조 (RFC 3711):
+//   [RTP Header (12B)] [Encrypted Payload] [Auth Tag (10B)]
+//
+// Auth Tag = truncate(HMAC-SHA1(auth_key, RTP Header || Encrypted Payload), 10)
 // ============================================================================
 void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
                                const uint8_t* payload, size_t size) {
-    uint8_t packet[12 + MAX_RTP_PAYLOAD + 2];
+    uint8_t packet[12 + MAX_RTP_PAYLOAD + 2 + kSrtpAuthTagLen];
 
     // RTP header (12 bytes)
     packet[0]  = 0x80;  // V=2
@@ -532,14 +537,24 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     packet[10] = static_cast<uint8_t>((s.ssrc >> 8)  & 0xFF);
     packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
+    // 페이로드 복사 후 암호화
     std::memcpy(packet + 12, payload, size);
     this->cipher_->encrypt(packet + 12, size);
     ++s.seq;
 
-    size_t totalLen = 12 + size;
+    size_t rtpLen = 12 + size;  // RTP 헤더 + 암호화된 페이로드
+
+    // HMAC-SHA1 인증 태그 생성: RTP 헤더 + 암호화된 페이로드 전체에 대해 계산
+    auto digest = HmacSha1::compute(
+        this->authKey_.data(), this->authKey_.size(),
+        packet, rtpLen);
+    // 80-bit 로 truncate 하여 패킷 끝에 추가
+    std::memcpy(packet + rtpLen, digest.data(), kSrtpAuthTagLen);
+
+    size_t totalLen = rtpLen + kSrtpAuthTagLen;
 
     if (s.tcpTransport) {
-        // TCP interleaved: $ + channel(1) + length(2, big-endian) + RTP packet
+        // TCP interleaved: $ + channel(1) + length(2, big-endian) + SRTP packet
         uint8_t header[4];
         header[0] = '$';
         header[1] = s.rtpChannel;

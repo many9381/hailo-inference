@@ -5,4 +5,9 @@ target_sources(hailo_common PRIVATE
     XorCipher.h
     AriaCipher.cpp
     AriaCipher.h
+    HmacSha1.cpp
+    HmacSha1.h
 )
+
+add_subdirectory(sha)
+add_subdirectory(hmac)
