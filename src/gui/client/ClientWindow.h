@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -35,11 +36,12 @@ private:
     QWidget*      central_       = nullptr;
     QVBoxLayout*  mainLayout_    = nullptr;
     QHBoxLayout*  controlLayout_ = nullptr;
-    QLineEdit*    ipEdit_        = nullptr;
-    QPushButton*  connectBtn_    = nullptr;
-    QPushButton*  disconnectBtn_ = nullptr;
-    QLabel*       statusLabel_   = nullptr;
-    QLabel*       videoLabel_    = nullptr;
+    QLineEdit*    ipEdit_         = nullptr;
+    QComboBox*    transportCombo_ = nullptr;
+    QPushButton*  connectBtn_     = nullptr;
+    QPushButton*  disconnectBtn_  = nullptr;
+    QLabel*       statusLabel_    = nullptr;
+    QLabel*       videoLabel_     = nullptr;
 
     // RTSP 연결 설정
     int         rtspPort_ = 8554;

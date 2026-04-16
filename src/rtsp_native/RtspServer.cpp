@@ -290,6 +290,8 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
             }
             s.rtpChannel = ch;
 
+            qInfo() << "[RtspServer] 세션" << s.id.c_str()
+                    << "RTP 전송: TCP interleaved (channel" << ch << ")";
             response = this->buildSetupResponse(cseq, s.id, transport);
         } else {
             // UDP: client_port 추출 후 UDP 소켓 바인드
@@ -318,6 +320,9 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
             ::getsockname(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), &localLen);
             uint16_t serverRtpPort = ntohs(localAddr.sin_port);
 
+            qInfo() << "[RtspServer] 세션" << s.id.c_str()
+                    << "RTP 전송: UDP (client_port=" << clientRtpPort
+                    << ", server_port=" << serverRtpPort << ")";
             response = this->buildSetupResponse(cseq, s.id, transport +
                 ";server_port=" + std::to_string(serverRtpPort) + "-" +
                 std::to_string(serverRtpPort + 1));

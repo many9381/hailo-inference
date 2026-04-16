@@ -20,21 +20,28 @@ ClientWindow::ClientWindow(const std::string& serverIp,
     this->central_    = new QWidget(this);
     this->mainLayout_ = new QVBoxLayout(this->central_);
 
-    // 컨트롤 행: [IP 입력] [Connect] [Disconnect] [상태]
+    // 컨트롤 행: [IP 입력] [TCP/UDP] [Connect] [Disconnect] [상태]
     this->controlLayout_ = new QHBoxLayout();
-    this->ipEdit_        = new QLineEdit(this->central_);
-    this->connectBtn_    = new QPushButton("Connect",    this->central_);
-    this->disconnectBtn_ = new QPushButton("Disconnect", this->central_);
-    this->statusLabel_   = new QLabel("연결 안됨",       this->central_);
+    this->ipEdit_         = new QLineEdit(this->central_);
+    this->transportCombo_ = new QComboBox(this->central_);
+    this->connectBtn_     = new QPushButton("Connect",    this->central_);
+    this->disconnectBtn_  = new QPushButton("Disconnect", this->central_);
+    this->statusLabel_    = new QLabel("연결 안됨",       this->central_);
 
     this->ipEdit_->setPlaceholderText("Server IP (예: 192.168.0.10)");
     this->ipEdit_->setMinimumWidth(220);
     if (!serverIp.empty()) {
         this->ipEdit_->setText(QString::fromStdString(serverIp));
     }
+
+    this->transportCombo_->addItem("UDP", false);
+    this->transportCombo_->addItem("TCP", true);
+    this->transportCombo_->setCurrentIndex(rtp_tcp ? 1 : 0);
+
     this->disconnectBtn_->setEnabled(false);
 
     this->controlLayout_->addWidget(this->ipEdit_);
+    this->controlLayout_->addWidget(this->transportCombo_);
     this->controlLayout_->addWidget(this->connectBtn_);
     this->controlLayout_->addWidget(this->disconnectBtn_);
     this->controlLayout_->addWidget(this->statusLabel_);
@@ -51,13 +58,8 @@ ClientWindow::ClientWindow(const std::string& serverIp,
     this->mainLayout_->addWidget(this->videoLabel_);
     this->setCentralWidget(this->central_);
 
-    // ── RTSP 클라이언트 + NAL 디코더 (Qt parent-child → 소멸 시 자동 정리) ──
-    this->rtspClient_ = new RtspClient(this->rtpTcp_, this);
-    this->decoder_    = new NalDecoderPipeline(this);
-
-    // RtspClient::nalReceived → NalDecoderPipeline::pushNal
-    connect(this->rtspClient_, &RtspClient::nalReceived,
-            this->decoder_,    &NalDecoderPipeline::pushNal);
+    // ── NAL 디코더 (Qt parent-child → 소멸 시 자동 정리) ──
+    this->decoder_ = new NalDecoderPipeline(this);
 
     // NalDecoderPipeline::frameReady → ClientWindow::onFrameReady
     connect(this->decoder_,  &NalDecoderPipeline::frameReady,
@@ -95,12 +97,27 @@ void ClientWindow::onConnectClicked() {
         return;
     }
 
+    bool useTcp = this->transportCombo_->currentData().toBool();
+
     const std::string url =
         "rtsp://" + ip.toStdString() + ":" +
         std::to_string(this->rtspPort_) + this->rtspPath_;
 
     this->statusLabel_->setText("연결 중...");
-    std::cout << "[ClientWindow] RTSP 연결 시도: " << url << std::endl;
+    std::cout << "[ClientWindow] RTSP 연결 시도: " << url
+              << " (RTP " << (useTcp ? "TCP" : "UDP") << ")" << std::endl;
+
+    // 이전 클라이언트가 있으면 정리
+    if (this->rtspClient_) {
+        this->rtspClient_->stop();
+        delete this->rtspClient_;
+        this->rtspClient_ = nullptr;
+    }
+
+    // 선택된 전송 모드로 RtspClient 생성
+    this->rtspClient_ = new RtspClient(useTcp, this);
+    connect(this->rtspClient_, &RtspClient::nalReceived,
+            this->decoder_,    &NalDecoderPipeline::pushNal);
 
     // 디코더 먼저 시작
     if (!this->decoder_->start()) {
@@ -150,4 +167,5 @@ void ClientWindow::setConnected(bool connected) {
     this->connectBtn_->setEnabled(!connected);
     this->disconnectBtn_->setEnabled(connected);
     this->ipEdit_->setEnabled(!connected);
+    this->transportCombo_->setEnabled(!connected);
 }
