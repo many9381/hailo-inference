@@ -300,14 +300,12 @@ void X25519::feInvert(Fe out, const Fe z) {
     for (int i = 0; i < 49; ++i) feSquare(t2, t2);
     feMul(t1, t2, t1);      // t1 = z^(2^250 - 1)
 
-    feSquare(t1, t1);
-    feSquare(t1, t1);
-    feMul(t1, t1, z);       // t1 = z^(2^252 - 3)
-
-    feSquare(t1, t1);
-    feSquare(t1, t1);
-    feSquare(t1, t1);
-    feMul(out, t1, t0);     // out = z^(2^255 - 21)
+    feSquare(t1, t1);       // z^(2^251 - 2)
+    feSquare(t1, t1);       // z^(2^252 - 4)
+    feSquare(t1, t1);       // z^(2^253 - 8)
+    feSquare(t1, t1);       // z^(2^254 - 16)
+    feSquare(t1, t1);       // z^(2^255 - 32)
+    feMul(out, t1, t0);     // z^(2^255 - 32 + 11) = z^(2^255 - 21) = z^(p-2)
 }
 
 // ============================================================================
