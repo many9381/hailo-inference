@@ -1,5 +1,5 @@
 #include "Hkdf.h"
-#include "HmacSha256.h"
+#include "hmac/HmacSha256.h"
 
 #include <algorithm>
 #include <cstring>

@@ -11,7 +11,7 @@
 #include <memory>
 
 #include "crypto/AriaCipher.h"
-#include "crypto/HmacSha1.h"
+#include "crypto/hmac/HmacSha1.h"
 #include "crypto/ICipher.h"
 #include "crypto/TlsHandshake.h"
 

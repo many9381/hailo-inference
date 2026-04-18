@@ -1,7 +1,7 @@
 #pragma once
 
-#include "hmac/Hmac.h"
-#include "sha/Sha256.h"
+#include "Hmac.h"
+#include "../sha/Sha256.h"
 
 // ----------------------------------------------------------------------------
 // HmacSha256
