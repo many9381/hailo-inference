@@ -13,6 +13,8 @@ video_path = resource/sample.mp4
 port = 8554
 ; RTSP 스트림 경로
 stream_path = /stream
+; RTP 전송 프로토콜: "udp" 또는 "tcp" (TCP interleaved)
+protocol = udp
 
 [client]
 ; 접속할 서버 IP 주소 (client 모드에서만 사용)

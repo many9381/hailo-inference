@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "crypto/AriaCipher.h"
+#include "crypto/HmacSha1.h"
 #include "crypto/ICipher.h"
 
 // ----------------------------------------------------------------------------
@@ -43,7 +44,8 @@
 // ----------------------------------------------------------------------------
 class RtspServer {
 public:
-    RtspServer(int port, std::string mountPoint, int width, int height, int fps);
+    RtspServer(int port, std::string mountPoint, int width, int height, int fps,
+               bool rtpTcp = false);
     ~RtspServer();
 
     RtspServer(const RtspServer&) = delete;
@@ -88,6 +90,7 @@ private:
     // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
     // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
     bool sendEncrypted(int fd, const std::string& data);
+    bool sendEncryptedLocked(Session& s, const std::string& data);
     bool recvEncrypted(int fd, std::string& data);
 
     // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
@@ -105,6 +108,7 @@ private:
     int         width_;   // SDP/로그 출력용
     int         height_;
     int         fps_;
+    bool        rtpTcp_;  // true: TCP interleaved, false: UDP
 
     // ── 소켓/스레드 ──────────────────────────────────────────────────────
     int               listenFd_ = -1;
@@ -121,11 +125,19 @@ private:
     // ── 전송 카운터 ──────────────────────────────────────────────────────
     uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
 
-    // ── RTP payload 암호화 ───────────────────────────────────────────────
+    // ── SRTP 암호화 + 인증 ─────────────────────────────────────────────
+    static constexpr size_t kSrtpAuthTagLen = 10;  // RFC 3711: 80-bit truncated HMAC-SHA1
+
     std::unique_ptr<ICipher> cipher_ = [] {
         auto c = std::make_unique<AriaCipher>();
         c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
         c->setIv(std::string(16, '\0'));
         return c;
+    }();
+
+    // HMAC-SHA1 인증 키 (SRTP 인증 태그 생성용)
+    const std::vector<uint8_t> authKey_ = [] {
+        std::string k = "hailo_srtp_auth!";  // 16 bytes
+        return std::vector<uint8_t>(k.begin(), k.end());
     }();
 };

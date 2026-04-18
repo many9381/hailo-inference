@@ -50,6 +50,8 @@ int main(int argc, char* argv[]) {
     int         rtsp_port = cfg.value("rtsp/port",        8554).toInt();
     std::string rtsp_path = cfg.value("rtsp/stream_path", "/stream")
                                 .toString().toStdString();
+    bool        rtp_tcp   = cfg.value("rtsp/protocol", "udp")
+                                .toString().toLower() == "tcp";
 
     std::string hef_path   = cfg.value("server/hef_path",  "")
                                  .toString().toStdString();
@@ -69,8 +71,10 @@ int main(int argc, char* argv[]) {
               << " | server_ip="  << (server_ip.empty() ? "(GUI 입력)" : server_ip)
               << " | rtsp_port="  << rtsp_port
               << " | rtsp_path="  << rtsp_path
+              << " | rtp_transport=" << (rtp_tcp ? "tcp" : "udp")
               << std::endl;
 
     GuiApp gui_app(argc, argv);
-    return gui_app.run(role, hef_path, video_path, server_ip, rtsp_port, rtsp_path);
+    return gui_app.run(role, hef_path, video_path, server_ip,
+                       rtsp_port, rtsp_path, rtp_tcp);
 }

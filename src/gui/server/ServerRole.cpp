@@ -11,8 +11,9 @@ int runServerRole(QApplication& app,
                   const std::string& hef_path,
                   const std::string& video_path,
                   int rtsp_port,
-                  const std::string& rtsp_path) {
-    ServerWindow window(hef_path, rtsp_port, rtsp_path);
+                  const std::string& rtsp_path,
+                  bool rtp_tcp) {
+    ServerWindow window(hef_path, rtsp_port, rtsp_path, rtp_tcp);
     window.show();
 
     if (!video_path.empty()) {
