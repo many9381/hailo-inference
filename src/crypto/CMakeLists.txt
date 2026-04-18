@@ -7,6 +7,16 @@ target_sources(hailo_common PRIVATE
     AriaCipher.h
     HmacSha1.cpp
     HmacSha1.h
+    HmacSha256.cpp
+    HmacSha256.h
+    Hkdf.cpp
+    Hkdf.h
+    X25519.cpp
+    X25519.h
+    SecureRandom.cpp
+    SecureRandom.h
+    TlsHandshake.cpp
+    TlsHandshake.h
 )
 
 add_subdirectory(sha)
