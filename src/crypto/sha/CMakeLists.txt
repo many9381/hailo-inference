@@ -4,4 +4,6 @@ target_sources(hailo_common PRIVATE
     Sha1.h
     Sha256.cpp
     Sha256.h
+    Sha3.cpp
+    Sha3.h
 )

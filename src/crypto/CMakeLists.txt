@@ -11,9 +11,8 @@ target_sources(hailo_common PRIVATE
     X25519.h
     SecureRandom.cpp
     SecureRandom.h
-    TlsHandshake.cpp
-    TlsHandshake.h
 )
 
 add_subdirectory(sha)
 add_subdirectory(hmac)
+add_subdirectory(pqc-kem)
