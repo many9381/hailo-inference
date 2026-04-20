@@ -3,9 +3,13 @@
 #include <sys/socket.h>
 #include <cstring>
 
+#include <openssl/core_names.h>
+#include <openssl/evp.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
+#include <openssl/rand.h>
+
 #include "crypto/AriaCipher.h"
-#include "crypto/Hkdf.h"
-#include "crypto/SecureRandom.h"
 
 // ============================================================================
 // 소켓 송수신 헬퍼
@@ -86,19 +90,37 @@ bool TlsHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
     std::memcpy(salt.data(), clientRandom, kRandomSize);
     std::memcpy(salt.data() + kRandomSize, serverRandom, kRandomSize);
 
-    // ikm = shared_secret
-    std::vector<uint8_t> ikm(sharedSecret.begin(), sharedSecret.end());
-
     // info = 고정 라벨
-    const std::string label = "hailo-tls13-srtp-keys";
-    std::vector<uint8_t> info(label.begin(), label.end());
+    const char* label = "hailo-tls13-srtp-keys";
 
     // 총 필요한 키 재료: 16 + 16 + 20 + 16 + 16 = 84 바이트
-    const size_t totalKeyLen = kSrtpKeySize + kSrtpIvSize + kSrtpAuthKeySize
-                             + kRtspKeySize + kRtspIvSize;
+    constexpr size_t totalKeyLen = kSrtpKeySize + kSrtpIvSize + kSrtpAuthKeySize
+                                 + kRtspKeySize + kRtspIvSize;
 
-    auto okm = Hkdf::deriveKey(salt, ikm, info, totalKeyLen);
-    if (okm.size() != totalKeyLen) return false;
+    // OpenSSL HKDF-SHA256
+    EVP_KDF* kdf = EVP_KDF_fetch(nullptr, "HKDF", nullptr);
+    if (!kdf) return false;
+
+    EVP_KDF_CTX* kctx = EVP_KDF_CTX_new(kdf);
+    EVP_KDF_free(kdf);
+    if (!kctx) return false;
+
+    OSSL_PARAM params[5];
+    params[0] = OSSL_PARAM_construct_utf8_string(
+        OSSL_KDF_PARAM_DIGEST, const_cast<char*>("SHA256"), 0);
+    params[1] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_SALT, salt.data(), salt.size());
+    params[2] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_KEY,
+        const_cast<uint8_t*>(sharedSecret.data()), sharedSecret.size());
+    params[3] = OSSL_PARAM_construct_octet_string(
+        OSSL_KDF_PARAM_INFO, const_cast<char*>(label), std::strlen(label));
+    params[4] = OSSL_PARAM_construct_end();
+
+    std::vector<uint8_t> okm(totalKeyLen);
+    int rc = EVP_KDF_derive(kctx, okm.data(), totalKeyLen, params);
+    EVP_KDF_CTX_free(kctx);
+    if (rc != 1) return false;
 
     // 키 재료를 분배
     size_t offset = 0;
@@ -122,73 +144,135 @@ bool TlsHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
 }
 
 // ============================================================================
-// 서버측 핸드셰이크 (PQC-KEM)
+// 서버측 핸드셰이크 (ML-KEM-768)
 //
-// 1. KEM 키 쌍 생성
-// 2. ServerHello 송신 (server_random + kem_public_key)
-// 3. ClientHello 수신 (client_random + kem_ciphertext)
+// 1. ML-KEM 키 쌍 생성 (OpenSSL EVP)
+// 2. ServerHello 송신 (server_random + ml_kem_pk)
+// 3. ClientHello 수신 (client_random + ml_kem_ct)
 // 4. 역캡슐화로 공유 비밀 복원
 // 5. 키 유도
 // ============================================================================
 
 bool TlsHandshake::performServerHandshake(int fd) {
-    // 1. KEM 키 쌍 생성
-    Kem kem;
-    auto kp = kem.keygen();
+    // 1. ML-KEM-768 키 쌍 생성
+    EVP_PKEY* pkey = EVP_PKEY_Q_keygen(nullptr, nullptr, kMlKemAlg);
+    if (!pkey) return false;
+
+    // 공개 키 추출
+    std::vector<uint8_t> pk(kMlKemPublicKeyBytes);
+    size_t pkLen = kMlKemPublicKeyBytes;
+    if (EVP_PKEY_get_raw_public_key(pkey, pk.data(), &pkLen) != 1
+        || pkLen != kMlKemPublicKeyBytes) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
 
     // 2. ServerHello 송신 (server_random + pk)
-    SystemRandom rng;
     uint8_t serverRandom[kRandomSize];
-    if (!rng.generate(serverRandom, kRandomSize)) return false;
-    if (!sendHandshakeMsg(fd, kServerHello, serverRandom,
-                          kp.publicKey.data(), Kem::PublicKeyBytes))
+    if (RAND_bytes(serverRandom, kRandomSize) != 1) {
+        EVP_PKEY_free(pkey);
         return false;
+    }
+    if (!sendHandshakeMsg(fd, kServerHello, serverRandom,
+                          pk.data(), kMlKemPublicKeyBytes)) {
+        EVP_PKEY_free(pkey);
+        return false;
+    }
 
     // 3. ClientHello 수신 (client_random + ct)
     uint8_t clientRandom[kRandomSize];
-    std::vector<uint8_t> ct(Kem::CiphertextBytes);
+    std::vector<uint8_t> ct(kMlKemCiphertextBytes);
     if (!recvHandshakeMsg(fd, kClientHello, clientRandom,
-                          ct.data(), Kem::CiphertextBytes))
+                          ct.data(), kMlKemCiphertextBytes)) {
+        EVP_PKEY_free(pkey);
         return false;
+    }
 
     // 4. 역캡슐화 → 공유 비밀
-    auto sharedSecret = kem.decapsulate(ct.data(), kp.secretKey.data());
+    EVP_PKEY_CTX* dctx = EVP_PKEY_CTX_new_from_pkey(nullptr, pkey, nullptr);
+    EVP_PKEY_free(pkey);
+    if (!dctx) return false;
+
+    if (EVP_PKEY_decapsulate_init(dctx, nullptr) != 1) {
+        EVP_PKEY_CTX_free(dctx);
+        return false;
+    }
+
+    size_t ssLen = 0;
+    if (EVP_PKEY_decapsulate(dctx, nullptr, &ssLen,
+                             ct.data(), kMlKemCiphertextBytes) != 1) {
+        EVP_PKEY_CTX_free(dctx);
+        return false;
+    }
+
+    std::vector<uint8_t> sharedSecret(ssLen);
+    if (EVP_PKEY_decapsulate(dctx, sharedSecret.data(), &ssLen,
+                             ct.data(), kMlKemCiphertextBytes) != 1) {
+        EVP_PKEY_CTX_free(dctx);
+        return false;
+    }
+    EVP_PKEY_CTX_free(dctx);
 
     // 5. 키 유도
     return deriveKeys(sharedSecret, clientRandom, serverRandom);
 }
 
 // ============================================================================
-// 클라이언트측 핸드셰이크 (PQC-KEM)
+// 클라이언트측 핸드셰이크 (ML-KEM-768)
 //
-// 1. ServerHello 수신 (server_random + kem_public_key)
+// 1. ServerHello 수신 (server_random + ml_kem_pk)
 // 2. 캡슐화 → (암호문, 공유 비밀)
-// 3. ClientHello 송신 (client_random + kem_ciphertext)
+// 3. ClientHello 송신 (client_random + ml_kem_ct)
 // 4. 키 유도
 // ============================================================================
 
 bool TlsHandshake::performClientHandshake(int fd) {
     // 1. ServerHello 수신 (server_random + pk)
     uint8_t serverRandom[kRandomSize];
-    std::vector<uint8_t> pk(Kem::PublicKeyBytes);
+    std::vector<uint8_t> pk(kMlKemPublicKeyBytes);
     if (!recvHandshakeMsg(fd, kServerHello, serverRandom,
-                          pk.data(), Kem::PublicKeyBytes))
+                          pk.data(), kMlKemPublicKeyBytes))
         return false;
 
-    // 2. 캡슐화 → (암호문, 공유 비밀)
-    Kem kem;
-    auto result = kem.encapsulate(pk.data());
+    // 2. 수신한 공개 키로 EVP_PKEY 복원
+    EVP_PKEY* peer = EVP_PKEY_new_raw_public_key_ex(
+        nullptr, kMlKemAlg, nullptr, pk.data(), kMlKemPublicKeyBytes);
+    if (!peer) return false;
+
+    // 캡슐화 → (암호문, 공유 비밀)
+    EVP_PKEY_CTX* ectx = EVP_PKEY_CTX_new_from_pkey(nullptr, peer, nullptr);
+    EVP_PKEY_free(peer);
+    if (!ectx) return false;
+
+    if (EVP_PKEY_encapsulate_init(ectx, nullptr) != 1) {
+        EVP_PKEY_CTX_free(ectx);
+        return false;
+    }
+
+    size_t ctLen = 0, ssLen = 0;
+    if (EVP_PKEY_encapsulate(ectx, nullptr, &ctLen, nullptr, &ssLen) != 1) {
+        EVP_PKEY_CTX_free(ectx);
+        return false;
+    }
+
+    std::vector<uint8_t> ct(ctLen);
+    std::vector<uint8_t> sharedSecret(ssLen);
+    if (EVP_PKEY_encapsulate(ectx, ct.data(), &ctLen,
+                             sharedSecret.data(), &ssLen) != 1) {
+        EVP_PKEY_CTX_free(ectx);
+        return false;
+    }
+    EVP_PKEY_CTX_free(ectx);
 
     // 3. ClientHello 송신 (client_random + ct)
-    SystemRandom rng;
     uint8_t clientRandom[kRandomSize];
-    if (!rng.generate(clientRandom, kRandomSize)) return false;
+    if (RAND_bytes(clientRandom, kRandomSize) != 1) return false;
     if (!sendHandshakeMsg(fd, kClientHello, clientRandom,
-                          result.ciphertext.data(), Kem::CiphertextBytes))
+                          ct.data(), kMlKemCiphertextBytes))
         return false;
 
     // 4. 키 유도
-    return deriveKeys(result.sharedSecret, clientRandom, serverRandom);
+    return deriveKeys(sharedSecret, clientRandom, serverRandom);
 }
 
 // ============================================================================

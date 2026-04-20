@@ -15,6 +15,8 @@
 #include <random>
 #include <sstream>
 
+#include <openssl/hmac.h>
+
 #include "rtsp_native/TlsHandshake.h"
 
 // ============================================================================
@@ -576,12 +578,15 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
 
     size_t rtpLen = 12 + size;  // RTP 헤더 + 암호화된 페이로드
 
-    // HMAC-SHA1 인증 태그 생성: 세션별 인증 키 사용
-    auto digest = HmacSha1::compute(
-        s.srtpAuthKey.data(), s.srtpAuthKey.size(),
-        packet, rtpLen);
+    // HMAC-SHA1 인증 태그 생성: OpenSSL HMAC + 세션별 인증 키
+    unsigned int hmacLen = 0;
+    uint8_t hmacBuf[20];  // SHA1 = 20 바이트
+    HMAC(EVP_sha1(),
+         s.srtpAuthKey.data(), static_cast<int>(s.srtpAuthKey.size()),
+         packet, rtpLen,
+         hmacBuf, &hmacLen);
     // 80-bit 로 truncate 하여 패킷 끝에 추가
-    std::memcpy(packet + rtpLen, digest.data(), kSrtpAuthTagLen);
+    std::memcpy(packet + rtpLen, hmacBuf, kSrtpAuthTagLen);
 
     size_t totalLen = rtpLen + kSrtpAuthTagLen;
 

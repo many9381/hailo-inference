@@ -12,7 +12,6 @@
 #include <memory>
 
 #include "crypto/AriaCipher.h"
-#include "crypto/hmac/HmacSha1.h"
 #include "crypto/ICipher.h"
 #include "rtsp_native/TlsHandshake.h"
 

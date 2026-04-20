@@ -17,6 +17,8 @@
 #include <random>
 #include <sstream>
 
+#include <openssl/hmac.h>
+
 #include "rtsp_native/TlsHandshake.h"
 
 // ============================================================================
@@ -442,11 +444,15 @@ void RtspClient::rtpLoop() {
         size_t rtpLen = pktLen - kSrtpAuthTagLen;
         const uint8_t* receivedTag = buf + rtpLen;
 
-        auto digest = HmacSha1::compute(
-            this->srtpAuthKey_.data(), this->srtpAuthKey_.size(),
-            buf, rtpLen);
+        unsigned int hmacLen = 0;
+        uint8_t hmacBuf[20];  // SHA1 = 20 바이트
+        HMAC(EVP_sha1(),
+             this->srtpAuthKey_.data(),
+             static_cast<int>(this->srtpAuthKey_.size()),
+             buf, rtpLen,
+             hmacBuf, &hmacLen);
 
-        if (std::memcmp(digest.data(), receivedTag, kSrtpAuthTagLen) != 0) {
+        if (std::memcmp(hmacBuf, receivedTag, kSrtpAuthTagLen) != 0) {
             qWarning() << "[RtspClient] SRTP 인증 태그 불일치 — 패킷 폐기";
             continue;
         }

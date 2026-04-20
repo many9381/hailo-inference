@@ -5,12 +5,4 @@ target_sources(hailo_common PRIVATE
     XorCipher.h
     AriaCipher.cpp
     AriaCipher.h
-    Hkdf.cpp
-    Hkdf.h
-    SecureRandom.cpp
-    SecureRandom.h
 )
-
-add_subdirectory(sha)
-add_subdirectory(hmac)
-add_subdirectory(pqc-kem)
