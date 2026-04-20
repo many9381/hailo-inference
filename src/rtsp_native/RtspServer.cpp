@@ -15,6 +15,8 @@
 #include <random>
 #include <sstream>
 
+#include "rtsp_native/TlsHandshake.h"
+
 // ============================================================================
 // Session — 한 RTSP 클라이언트에 대한 세션 상태
 // ============================================================================
@@ -30,6 +32,11 @@ struct RtspServer::Session {
     uint8_t          rtpChannel   = 0;     // interleaved channel (보통 0)
     std::mutex       writeMu;              // TCP 쓰기 직렬화 (RTSP 응답 + RTP 패킷)
     std::atomic<bool> alive{true};
+
+    // ── TLS 에서 유도된 세션별 키 ─────────────────────────────────────
+    std::unique_ptr<ICipher> srtpCipher;      // SRTP 페이로드 암호화
+    std::unique_ptr<ICipher> rtspCipher;      // RTSP 제어 메시지 암호화
+    std::vector<uint8_t>     srtpAuthKey;     // SRTP HMAC-SHA1 인증 키
 };
 
 // ============================================================================
@@ -163,19 +170,37 @@ void RtspServer::acceptLoop() {
 }
 
 // ============================================================================
-// sendEncrypted — RTSP 메시지를 암호화하여 길이 프리픽스와 함께 전송
+// performTlsHandshake — TLS 1.3 키 교환 수행, 세션별 키 설정
+// ============================================================================
+bool RtspServer::performTlsHandshake(Session& s) {
+    TlsHandshake tls;
+    if (!tls.performServerHandshake(s.tcpFd)) {
+        qWarning() << "[RtspServer] TLS 핸드셰이크 실패 — 세션" << s.id.c_str();
+        return false;
+    }
+
+    s.srtpCipher  = tls.createSrtpCipher();
+    s.rtspCipher  = tls.createRtspCipher();
+    s.srtpAuthKey = tls.srtpAuthKey();
+
+    qInfo() << "[RtspServer] TLS 1.3 핸드셰이크 완료 — 세션" << s.id.c_str();
+    return true;
+}
+
+// ============================================================================
+// sendEncrypted — RTSP 메시지를 세션별 RTSP cipher 로 암호화하여 전송
 // 프레이밍: [4-byte network-order length][encrypted payload]
 // ============================================================================
-bool RtspServer::sendEncrypted(int fd, const std::string& data) {
+bool RtspServer::sendEncrypted(Session& s, const std::string& data) {
     std::vector<uint8_t> buf(data.begin(), data.end());
-    this->cipher_->encrypt(buf.data(), buf.size());
+    s.rtspCipher->encrypt(buf.data(), buf.size());
 
     uint32_t netLen = htonl(static_cast<uint32_t>(buf.size()));
-    if (::send(fd, &netLen, 4, 0) != 4) return false;
+    if (::send(s.tcpFd, &netLen, 4, 0) != 4) return false;
 
     size_t sent = 0;
     while (sent < buf.size()) {
-        ssize_t n = ::send(fd, buf.data() + sent, buf.size() - sent, 0);
+        ssize_t n = ::send(s.tcpFd, buf.data() + sent, buf.size() - sent, 0);
         if (n <= 0) return false;
         sent += static_cast<size_t>(n);
     }
@@ -186,19 +211,19 @@ bool RtspServer::sendEncrypted(int fd, const std::string& data) {
 bool RtspServer::sendEncryptedLocked(Session& s, const std::string& data) {
     if (s.tcpTransport) {
         std::lock_guard<std::mutex> lock(s.writeMu);
-        return this->sendEncrypted(s.tcpFd, data);
+        return this->sendEncrypted(s, data);
     }
-    return this->sendEncrypted(s.tcpFd, data);
+    return this->sendEncrypted(s, data);
 }
 
 // ============================================================================
-// recvEncrypted — 길이 프리픽스 기반으로 암호화된 RTSP 메시지 수신 및 복호화
+// recvEncrypted — 세션별 RTSP cipher 로 암호화된 메시지 수신 및 복호화
 // ============================================================================
-bool RtspServer::recvEncrypted(int fd, std::string& data) {
+bool RtspServer::recvEncrypted(Session& s, std::string& data) {
     uint32_t netLen = 0;
     size_t received = 0;
     while (received < 4) {
-        ssize_t n = ::recv(fd, reinterpret_cast<char*>(&netLen) + received,
+        ssize_t n = ::recv(s.tcpFd, reinterpret_cast<char*>(&netLen) + received,
                            4 - received, 0);
         if (n <= 0) return false;
         received += static_cast<size_t>(n);
@@ -210,12 +235,12 @@ bool RtspServer::recvEncrypted(int fd, std::string& data) {
     std::vector<uint8_t> buf(len);
     received = 0;
     while (received < len) {
-        ssize_t n = ::recv(fd, buf.data() + received, len - received, 0);
+        ssize_t n = ::recv(s.tcpFd, buf.data() + received, len - received, 0);
         if (n <= 0) return false;
         received += static_cast<size_t>(n);
     }
 
-    this->cipher_->decrypt(buf.data(), buf.size());
+    s.rtspCipher->decrypt(buf.data(), buf.size());
     data.assign(buf.begin(), buf.end());
     return true;
 }
@@ -224,6 +249,13 @@ bool RtspServer::recvEncrypted(int fd, std::string& data) {
 // sessionLoop — RTSP 요청 수신 및 처리 (암호화 프레이밍)
 // ============================================================================
 void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
+    // ── TLS 1.3 핸드셰이크 (RTSP 시그널링 전에 수행) ────────────────────
+    if (!this->performTlsHandshake(*session)) {
+        session->alive.store(false);
+        if (session->tcpFd >= 0) { ::close(session->tcpFd); session->tcpFd = -1; }
+        return;
+    }
+
     while (this->running_.load() && session->alive.load()) {
         pollfd pfd{};
         pfd.fd     = session->tcpFd;
@@ -232,7 +264,7 @@ void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
         if (ret <= 0) continue;
 
         std::string req;
-        if (!this->recvEncrypted(session->tcpFd, req)) break;
+        if (!this->recvEncrypted(*session, req)) break;
         if (!this->handleRequest(*session, req)) {
             session->alive.store(false);
             break;
@@ -537,16 +569,16 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     packet[10] = static_cast<uint8_t>((s.ssrc >> 8)  & 0xFF);
     packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
-    // 페이로드 복사 후 암호화
+    // 페이로드 복사 후 세션별 SRTP cipher 로 암호화
     std::memcpy(packet + 12, payload, size);
-    this->cipher_->encrypt(packet + 12, size);
+    s.srtpCipher->encrypt(packet + 12, size);
     ++s.seq;
 
     size_t rtpLen = 12 + size;  // RTP 헤더 + 암호화된 페이로드
 
-    // HMAC-SHA1 인증 태그 생성: RTP 헤더 + 암호화된 페이로드 전체에 대해 계산
+    // HMAC-SHA1 인증 태그 생성: 세션별 인증 키 사용
     auto digest = HmacSha1::compute(
-        this->authKey_.data(), this->authKey_.size(),
+        s.srtpAuthKey.data(), s.srtpAuthKey.size(),
         packet, rtpLen);
     // 80-bit 로 truncate 하여 패킷 끝에 추가
     std::memcpy(packet + rtpLen, digest.data(), kSrtpAuthTagLen);

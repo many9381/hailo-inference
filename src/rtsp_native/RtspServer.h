@@ -11,8 +11,9 @@
 #include <memory>
 
 #include "crypto/AriaCipher.h"
-#include "crypto/HmacSha1.h"
+#include "crypto/hmac/HmacSha1.h"
 #include "crypto/ICipher.h"
+#include "rtsp_native/TlsHandshake.h"
 
 // ----------------------------------------------------------------------------
 // RtspServer
@@ -87,11 +88,15 @@ private:
     std::string buildGenericOkResponse(int cseq, const std::string& sessionId);
     std::string buildErrorResponse(int cseq, int code, const std::string& reason);
 
+    // ── TLS 핸드셰이크 ──────────────────��─────────────────────────────────
+    bool performTlsHandshake(Session& s);
+
     // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
     // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
-    bool sendEncrypted(int fd, const std::string& data);
+    // 세션별 RTSP cipher 를 사용한다.
+    bool sendEncrypted(Session& s, const std::string& data);
     bool sendEncryptedLocked(Session& s, const std::string& data);
-    bool recvEncrypted(int fd, std::string& data);
+    bool recvEncrypted(Session& s, std::string& data);
 
     // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
     // 한 NAL 을 Single-NAL-unit 또는 FU-A 모드로 여러 개의 RTP 패킷에 나눠 전송.
@@ -125,19 +130,6 @@ private:
     // ── 전송 카운터 ──────────────────────────────────────────────────────
     uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
 
-    // ── SRTP 암호화 + 인증 ─────────────────────────────────────────────
+    // ── SRTP 인증 태그 길이 ─────────────────────────────────────────────
     static constexpr size_t kSrtpAuthTagLen = 10;  // RFC 3711: 80-bit truncated HMAC-SHA1
-
-    std::unique_ptr<ICipher> cipher_ = [] {
-        auto c = std::make_unique<AriaCipher>();
-        c->setKey("hailo_secret_key");       // 16 bytes → ARIA-128
-        c->setIv(std::string(16, '\0'));
-        return c;
-    }();
-
-    // HMAC-SHA1 인증 키 (SRTP 인증 태그 생성용)
-    const std::vector<uint8_t> authKey_ = [] {
-        std::string k = "hailo_srtp_auth!";  // 16 bytes
-        return std::vector<uint8_t>(k.begin(), k.end());
-    }();
 };

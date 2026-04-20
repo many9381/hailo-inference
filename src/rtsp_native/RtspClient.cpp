@@ -17,6 +17,8 @@
 #include <random>
 #include <sstream>
 
+#include "rtsp_native/TlsHandshake.h"
+
 // ============================================================================
 // 생성자 / 소멸자
 // ============================================================================
@@ -40,6 +42,14 @@ bool RtspClient::start(const std::string& url) {
     this->baseUrl_ = url;
 
     if (!this->openControl()) return false;
+
+    // TLS 1.3 핸드셰이크 — RTSP 시그널링 전에 키 교환 수행
+    if (!this->performTlsHandshake()) {
+        ::close(this->controlFd_);
+        this->controlFd_ = -1;
+        return false;
+    }
+
     if (!this->rtpTcp_) {
         if (!this->bindRtpSocket()) {
             ::close(this->controlFd_);
@@ -92,6 +102,11 @@ void RtspClient::stop() {
     this->cseq_         = 1;
     this->fuBuffer_.clear();
     this->fuInProgress_ = false;
+
+    // TLS 유도 키 초기화
+    this->srtpCipher_.reset();
+    this->rtspCipher_.reset();
+    this->srtpAuthKey_.clear();
 }
 
 // ============================================================================
@@ -162,6 +177,24 @@ bool RtspClient::openControl() {
 }
 
 // ============================================================================
+// performTlsHandshake — TLS 1.3 키 교환 수행, 클라이언트측 키 설정
+// ============================================================================
+bool RtspClient::performTlsHandshake() {
+    TlsHandshake tls;
+    if (!tls.performClientHandshake(this->controlFd_)) {
+        qWarning() << "[RtspClient] TLS 핸드셰이크 실패";
+        return false;
+    }
+
+    this->srtpCipher_ = tls.createSrtpCipher();
+    this->rtspCipher_ = tls.createRtspCipher();
+    this->srtpAuthKey_ = tls.srtpAuthKey();
+
+    qInfo() << "[RtspClient] TLS 1.3 핸드셰이크 완료";
+    return true;
+}
+
+// ============================================================================
 // bindRtpSocket — 클라이언트 RTP 수신용 UDP 소켓 생성 (임시 포트 자동 할당)
 // ============================================================================
 bool RtspClient::bindRtpSocket() {
@@ -198,9 +231,9 @@ bool RtspClient::bindRtpSocket() {
 // sendRequest — 한 개의 RTSP 요청을 보내고 응답을 한 메시지까지 수신
 // ============================================================================
 bool RtspClient::sendRequest(const std::string& req, std::string* response) {
-    // ── 암호화하여 길이 프리픽스와 함께 전송 ────────────────────────────
+    // ── TLS 유도 RTSP cipher 로 암호화하여 길이 프리픽스와 함께 전송 ────
     std::vector<uint8_t> encBuf(req.begin(), req.end());
-    this->cipher_->encrypt(encBuf.data(), encBuf.size());
+    this->rtspCipher_->encrypt(encBuf.data(), encBuf.size());
 
     uint32_t netLen = htonl(static_cast<uint32_t>(encBuf.size()));
     if (::send(this->controlFd_, &netLen, 4, 0) != 4) {
@@ -253,7 +286,7 @@ bool RtspClient::sendRequest(const std::string& req, std::string* response) {
         }
     }
 
-    this->cipher_->decrypt(respBuf.data(), respBuf.size());
+    this->rtspCipher_->decrypt(respBuf.data(), respBuf.size());
     response->assign(respBuf.begin(), respBuf.end());
     return true;
 }
@@ -410,7 +443,7 @@ void RtspClient::rtpLoop() {
         const uint8_t* receivedTag = buf + rtpLen;
 
         auto digest = HmacSha1::compute(
-            this->authKey_.data(), this->authKey_.size(),
+            this->srtpAuthKey_.data(), this->srtpAuthKey_.size(),
             buf, rtpLen);
 
         if (std::memcmp(digest.data(), receivedTag, kSrtpAuthTagLen) != 0) {
@@ -436,7 +469,7 @@ void RtspClient::rtpLoop() {
         uint8_t* payload = buf + headerLen;
         size_t   payloadSize = rtpLen - headerLen;
         if (payloadSize == 0) continue;
-        this->cipher_->decrypt(payload, payloadSize);
+        this->srtpCipher_->decrypt(payload, payloadSize);
         this->handleRtpPayload(payload, payloadSize);
     }
 }
