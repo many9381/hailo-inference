@@ -10,17 +10,11 @@
 // Reference: SMAUG-T reference implementation (toomcook.c)
 // ============================================================================
 
-namespace {
-
-constexpr int kKaratsubaN = 64;
-constexpr int kNSB        = kSmaugtN >> 2;   // 64
-constexpr int kNSBRes     = 2 * kNSB - 1;    // 127
-
-inline uint16_t overflowMul(uint16_t x, uint16_t y) {
+uint16_t SmaugtPoly::overflowMul(uint16_t x, uint16_t y) {
     return static_cast<uint16_t>(static_cast<uint32_t>(x) * static_cast<uint32_t>(y));
 }
 
-void karatsubaSimple(const uint16_t* a1, const uint16_t* b1, uint16_t* result_final) {
+void SmaugtPoly::karatsubaSimple(const uint16_t* a1, const uint16_t* b1, uint16_t* result_final) {
     uint16_t d01[kKaratsubaN / 2 - 1];
     uint16_t d0123[kKaratsubaN / 2 - 1];
     uint16_t d23[kKaratsubaN / 2 - 1];
@@ -96,7 +90,7 @@ void karatsubaSimple(const uint16_t* a1, const uint16_t* b1, uint16_t* result_fi
     }
 }
 
-void toomCook4Way(const uint16_t* a1, const uint16_t* b1, uint16_t* result) {
+void SmaugtPoly::toomCook4Way(const uint16_t* a1, const uint16_t* b1, uint16_t* result) {
     constexpr uint16_t inv3  = 43691;
     constexpr uint16_t inv9  = 36409;
     constexpr uint16_t inv15 = 61167;
@@ -186,8 +180,6 @@ void toomCook4Way(const uint16_t* a1, const uint16_t* b1, uint16_t* result) {
         C[i + 384] += r0;
     }
 }
-
-} // anonymous namespace
 
 void SmaugtPoly::polyMulAcc(const int16_t a[kSmaugtN], const int16_t b[kSmaugtN],
                             int16_t res[kSmaugtN]) {

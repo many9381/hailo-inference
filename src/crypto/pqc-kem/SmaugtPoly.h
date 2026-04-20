@@ -23,4 +23,14 @@ public:
 
 private:
     SmaugtPoly() = delete;
+
+    static constexpr int kKaratsubaN = 64;
+    static constexpr int kNSB        = kSmaugtN >> 2;   // 64
+    static constexpr int kNSBRes     = 2 * kNSB - 1;    // 127
+
+    static uint16_t overflowMul(uint16_t x, uint16_t y);
+    static void karatsubaSimple(const uint16_t* a1, const uint16_t* b1,
+                                uint16_t* result_final);
+    static void toomCook4Way(const uint16_t* a1, const uint16_t* b1,
+                             uint16_t* result);
 };

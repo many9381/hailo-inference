@@ -7,8 +7,6 @@ target_sources(hailo_common PRIVATE
     AriaCipher.h
     Hkdf.cpp
     Hkdf.h
-    X25519.cpp
-    X25519.h
     SecureRandom.cpp
     SecureRandom.h
 )
