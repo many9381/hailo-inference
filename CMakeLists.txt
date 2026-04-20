@@ -29,6 +29,9 @@ pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-video-1.0
 )
 
+# OpenSSL (ML-KEM 지원을 위해 3.5 이상 필요)
+find_package(OpenSSL REQUIRED)
+
 # HailoRT 는 hailo_server 전용. 미설치 환경에서는 server 빌드를 건너뛴다.
 find_package(HailoRT QUIET)
 
@@ -48,6 +51,8 @@ target_link_libraries(hailo_common PUBLIC
     ${OpenCV_LIBS}
     ${QT_LIBS}
     PkgConfig::GST
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # ── client 실행 파일 ─────────────────────────────────────────────────────────

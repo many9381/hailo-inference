@@ -5,30 +5,31 @@
 #include <string>
 #include <vector>
 
+#include <openssl/evp.h>
+
 #include "crypto/ICipher.h"
-#include "crypto/pqc-kem/SmaugtKem.h"
 
 // ----------------------------------------------------------------------------
 // TlsHandshake
 //
-// PQC-KEM (SMAUG-T) 기반 핸드셰이크 프로토콜의 키 교환 부분을 구현한다.
-// SMAUG-T KEM 키 캡슐화와 HKDF-SHA256 키 유도를 수행하여
+// ML-KEM-768 (FIPS 203) 기반 핸드셰이크 프로토콜의 키 교환 부분을 구현한다.
+// OpenSSL EVP API 를 통한 ML-KEM 키 캡슐화와 HKDF-SHA256 키 유도를 수행하여
 // SRTP 암복호화 및 RTSP 제어 메시지 암호화에 사용할 키 재료를 생성한다.
 //
 // 핸드셰이크 프로토콜 (KEM 방식):
 //
-//   Server → Client: ServerHello (707 바이트)
-//     [msg_type=2 (1B)] [version=0x0304 (2B)] [random (32B)] [kem_pk (672B)]
+//   Server → Client: ServerHello (1219 바이트)
+//     [msg_type=2 (1B)] [version=0x0304 (2B)] [random (32B)] [ml_kem_pk (1184B)]
 //
-//   Client → Server: ClientHello (707 바이트)
-//     [msg_type=1 (1B)] [version=0x0304 (2B)] [random (32B)] [kem_ct (672B)]
+//   Client → Server: ClientHello (1123 바이트)
+//     [msg_type=1 (1B)] [version=0x0304 (2B)] [random (32B)] [ml_kem_ct (1088B)]
 //
 //   서버측:
-//     keypair = SmaugtKem::keygen()
-//     shared_secret = SmaugtKem::decapsulate(ct, sk)
+//     pkey = EVP_PKEY_Q_keygen("ML-KEM-768")
+//     shared_secret = EVP_PKEY_decapsulate(pkey, ct)
 //
 //   클라이언트측:
-//     (ct, shared_secret) = SmaugtKem::encapsulate(pk)
+//     (ct, shared_secret) = EVP_PKEY_encapsulate(peer_pk)
 //
 //   양측 모두:
 //     키 유도 = HKDF-SHA256(salt=client_random||server_random, ikm=shared_secret)
@@ -46,7 +47,11 @@
 // ----------------------------------------------------------------------------
 class TlsHandshake {
 public:
-    using Kem = SmaugtKem<>;
+    // ML-KEM-768 (FIPS 203) 파라미터
+    static constexpr const char* kMlKemAlg          = "ML-KEM-768";
+    static constexpr size_t kMlKemPublicKeyBytes    = 1184;
+    static constexpr size_t kMlKemCiphertextBytes   = 1088;
+    static constexpr size_t kMlKemSharedSecretBytes = 32;
 
     static constexpr uint16_t kTls13Version = 0x0304;
     static constexpr uint8_t  kClientHello  = 1;
