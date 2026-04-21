@@ -1,5 +1,9 @@
 # 진입점은 양쪽 실행 파일에 동일하게 컴파일된다.
 target_sources(hailo_client PRIVATE main.cpp)
+target_sources(hailo_common PRIVATE
+    gstreamer/GstBootstrap.cpp
+    gstreamer/GstBootstrap.h
+)
 
 # server 전용: Hailo 추론 관련 코드
 target_sources(hailo_server PRIVATE

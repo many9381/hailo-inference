@@ -2,18 +2,20 @@
 
 #include <QDebug>
 
-VideoPipeline::VideoPipeline(QObject* parent) : QObject(parent) {
-    // GStreamer는 프로세스 전역에 한 번만 초기화되어야 한다(중복 호출 방지).
-    if (!gst_is_initialized()) {
-        gst_init(nullptr, nullptr);
-    }
-}
+#include "GstBootstrap.h"
+
+VideoPipeline::VideoPipeline(QObject* parent) : QObject(parent) {}
 
 VideoPipeline::~VideoPipeline() {
     this->stop();
 }
 
 bool VideoPipeline::start(const std::string& filepath) {
+    if (!initializeGStreamer()) {
+        qWarning() << "GStreamer 초기화 실패";
+        return false;
+    }
+
     // 이미 다른 영상이 재생 중이라면 안전하게 정리 후 재구성.
     this->stop();
 

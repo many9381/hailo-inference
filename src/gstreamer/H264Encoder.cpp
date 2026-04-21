@@ -1,5 +1,7 @@
 #include "H264Encoder.h"
 
+#include "GstBootstrap.h"
+
 #include <QDebug>
 
 #include <cstdio>
@@ -11,11 +13,7 @@
 // 생성자 / 소멸자
 // ============================================================================
 H264Encoder::H264Encoder(int width, int height, int fps)
-    : width_(width), height_(height), fps_(fps) {
-    if (!gst_is_initialized()) {
-        gst_init(nullptr, nullptr);
-    }
-}
+    : width_(width), height_(height), fps_(fps) {}
 
 H264Encoder::~H264Encoder() {
     this->stop();
@@ -25,6 +23,11 @@ H264Encoder::~H264Encoder() {
 // start / stop
 // ============================================================================
 bool H264Encoder::start() {
+    if (!initializeGStreamer()) {
+        qWarning() << "H264Encoder GStreamer 초기화 실패";
+        return false;
+    }
+
     this->stop();
 
     // gst-launch 형태의 파이프라인 정의를 문자열로 만들어 한 번에 빌드.

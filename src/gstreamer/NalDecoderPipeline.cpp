@@ -1,5 +1,7 @@
 #include "NalDecoderPipeline.h"
 
+#include "GstBootstrap.h"
+
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
@@ -11,11 +13,7 @@
 // ============================================================================
 // 생성자 / 소멸자
 // ============================================================================
-NalDecoderPipeline::NalDecoderPipeline(QObject* parent) : QObject(parent) {
-    if (!gst_is_initialized()) {
-        gst_init(nullptr, nullptr);
-    }
-}
+NalDecoderPipeline::NalDecoderPipeline(QObject* parent) : QObject(parent) {}
 
 NalDecoderPipeline::~NalDecoderPipeline() {
     this->stop();
@@ -25,6 +23,11 @@ NalDecoderPipeline::~NalDecoderPipeline() {
 // start — appsrc → h264parse → decoder → videoconvert → appsink
 // ============================================================================
 bool NalDecoderPipeline::start() {
+    if (!initializeGStreamer()) {
+        qWarning() << "[NalDecoderPipeline] GStreamer 초기화 실패";
+        return false;
+    }
+
     this->stop();
 
     this->pipeline_     = gst_pipeline_new("nal-decoder");
@@ -37,6 +40,12 @@ bool NalDecoderPipeline::start() {
 
     if (!this->appsrc_ || !parse || !decoder || !convert || !capsflt || !sink) {
         qWarning() << "[NalDecoderPipeline] 파이프라인 요소 생성 실패";
+        if (!this->appsrc_) qWarning() << "  missing element: appsrc";
+        if (!parse)         qWarning() << "  missing element: h264parse";
+        if (!decoder)       qWarning() << "  missing element: avdec_h264";
+        if (!convert)       qWarning() << "  missing element: videoconvert";
+        if (!capsflt)       qWarning() << "  missing element: capsfilter";
+        if (!sink)          qWarning() << "  missing element: appsink";
         if (this->appsrc_) { gst_object_unref(this->appsrc_); this->appsrc_ = nullptr; }
         if (parse)   gst_object_unref(parse);
         if (decoder) gst_object_unref(decoder);
