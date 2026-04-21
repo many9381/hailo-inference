@@ -1,22 +1,25 @@
 [mode]
-; 실행 역할 선택: "server" 또는 "client"
+; Select the runtime role: "server" or "client"
 role = client
 
 [server]
-; Hailo HEF 모델 경로 (server 모드에서만 사용)
+; Path to the Hailo HEF model (used only in server mode)
 hef_path = models/yolov8n.hef
-; 추론할 비디오 파일 경로. 비워두면 실행 파일 상위 디렉토리의
-video_path = resource/sample.mp4
+; Video source for inference. The following three formats are supported:
+;   1) File path    : resource/video.mp4  (uses resource/sample.mp4 if left empty)
+;   2) V4L2 device  : /dev/video0         (such as a USB webcam)
+;   3) RTSP URL     : rtsp://host:port/path
+video_path =
 
 [rtsp]
-; RTSP 서버 포트 (server: 송출, client: 수신에 공통 사용)
+; RTSP server port (used by both server for streaming and client for receiving)
 port = 8554
-; RTSP 스트림 경로
+; RTSP stream path
 stream_path = /stream
-; RTP 전송 프로토콜: "udp" 또는 "tcp" (TCP interleaved)
+; RTP transport protocol: "udp" or "tcp" (TCP interleaved)
 protocol = udp
 
 [client]
-; 접속할 서버 IP 주소 (client 모드에서만 사용)
-; 비워두면 GUI에서 직접 입력한다.
+; IP address of the server to connect to (used only in client mode)
+; If left empty, enter it directly in the GUI.
 server_ip = 127.0.0.1
