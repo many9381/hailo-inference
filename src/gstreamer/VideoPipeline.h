@@ -9,8 +9,8 @@
 #include <atomic>
 #include <string>
 
-// GStreamer 파이프라인을 캡슐화하여 비디오 파일을 디코딩하고
-// 디코딩된 프레임을 Qt 신호로 전달하는 클래스.
+// Class that encapsulates a GStreamer pipeline to decode video
+// and deliver decoded frames through Qt signals.
 class VideoPipeline : public QObject {
     Q_OBJECT
 
@@ -18,18 +18,19 @@ public:
     explicit VideoPipeline(QObject* parent = nullptr);
     ~VideoPipeline() override;
 
-    // 복사/이동 금지 (GStreamer 리소스 소유)
+    // Non-copyable/non-movable (owns GStreamer resources)
     VideoPipeline(const VideoPipeline&) = delete;
     VideoPipeline& operator=(const VideoPipeline&) = delete;
 
-    // 지정된 파일 경로로 파이프라인을 시작한다. 성공 시 true.
+    // Start the pipeline with the given video source. Returns true on success.
+    // filepath: local file path, V4L2 device (/dev/video*), or RTSP URL (rtsp://)
     bool start(const std::string& filepath);
 
-    // 파이프라인을 중지하고 모든 GStreamer 리소스를 해제한다.
+    // Stop the pipeline and release all GStreamer resources.
     void stop();
 
-    // 첫 프레임이 도착해 caps 의 framerate 가 파싱된 이후에만 유효한 값을 돌려준다.
-    // 그 전에는 0 을 돌려주므로 호출 측에서 fallback 처리가 필요.
+    // Returns a valid value only after the first frame arrives and the caps framerate has been parsed.
+    // Before that it returns 0, so the caller must apply a fallback.
     int fps() const { return this->fps_.load(); }
 
 signals:
@@ -41,7 +42,7 @@ private:
     GstElement* pipeline_ = nullptr;
     GstElement* appsink_ = nullptr;
 
-    // caps 에서 추출한 비디오 fps. onNewSample(streaming thread) 가 쓰고
-    // GUI thread 가 읽으므로 atomic.
+    // Video fps extracted from caps. Written by onNewSample (streaming thread)
+    // and read by the GUI thread, so it is atomic.
     std::atomic<int> fps_{0};
 };

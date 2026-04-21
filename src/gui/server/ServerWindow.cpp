@@ -19,15 +19,16 @@
 
 ServerWindow::ServerWindow(const std::string& hef_path,
                            int rtsp_port, const std::string& rtsp_path,
-                           QWidget* parent)
-    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path) {
+                           bool rtp_tcp, QWidget* parent)
+    : QMainWindow(parent), rtspPort_(rtsp_port), rtspPath_(rtsp_path),
+      rtpTcp_(rtp_tcp) {
     this->setWindowTitle("Hailo Inference GUI");
     this->resize(960, 720);
 
-    // this가 부모 → ServerWindow 소멸 시 자동 delete
+    // Parent is this -> automatically deleted when ServerWindow is destroyed
     this->central_ = new QWidget(this);
 
-    // central_이 부모 → 소멸 시 자동 delete
+    // Parent is central_ -> automatically deleted on destruction
     this->layout_ = new QVBoxLayout(this->central_);
     this->videoLabel_ = new QLabel(this->central_);
 
@@ -39,32 +40,32 @@ ServerWindow::ServerWindow(const std::string& hef_path,
 
     this->setCentralWidget(this->central_);
 
-    // HailoRT 추론 엔진 초기화. 실패 시 추론 없이 영상만 표시한다.
+    // Initialize the HailoRT inference engine. If it fails, only the video is displayed without inference.
     try {
         this->inference_ = std::make_unique<HailoInference>(hef_path);
-        std::cout << "HailoInference 초기화 완료: " << hef_path << std::endl;
+        std::cout << "HailoInference initialized: " << hef_path << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "HailoInference 초기화 실패 (" << hef_path << "): " << e.what() << std::endl;
+        std::cerr << "Failed to initialize HailoInference (" << hef_path << "): " << e.what() << std::endl;
         this->inference_.reset();
     }
 
-    // 추론 엔진이 준비된 경우에만 워커 스레드를 가동.
+    // Start the worker thread only if the inference engine is ready.
     if (this->inference_) {
         this->worker_ = std::thread(&ServerWindow::inferenceLoop, this);
     }
 
-    // this가 부모 → ServerWindow 소멸 시 자동 delete (GStreamer 리소스도 함께 정리)
+    // Parent is this -> automatically deleted when ServerWindow is destroyed (also cleans up GStreamer resources)
     this->pipeline_ = new VideoPipeline(this);
     connect(this->pipeline_, &VideoPipeline::frameReady,
             this, &ServerWindow::onFrameReady);
 }
 
 ServerWindow::~ServerWindow() {
-    // 더 이상 새 프레임이 들어오지 않도록 파이프라인을 먼저 정지.
+    // Stop the pipeline first so no more new frames arrive.
     if (this->pipeline_) {
         this->pipeline_->stop();
     }
-    // 워커 스레드 종료 신호 후 join.
+    // Signal worker-thread shutdown, then join.
     {
         std::lock_guard<std::mutex> lock(this->mu_);
         this->stopWorker_ = true;
@@ -77,7 +78,7 @@ ServerWindow::~ServerWindow() {
 
 void ServerWindow::playVideo(const QString& filepath) {
     if (!this->pipeline_->start(filepath.toStdString())) {
-        this->videoLabel_->setText("비디오 재생 실패: " + filepath);
+        this->videoLabel_->setText("Failed to play video: " + filepath);
     }
 }
 
@@ -97,7 +98,7 @@ void ServerWindow::inferenceLoop() {
         this->busy_.store(true, std::memory_order_release);
 
         try {
-            // hailo_inference()와 동일한 파이프라인: letterbox → BGR2RGB → 추론 → NMS
+            // Same pipeline as hailo_inference(): letterbox -> BGR2RGB -> inference -> NMS
             LetterboxInfo lb_info;
             cv::Mat input_img = Preprocessor::letterbox(frame, INPUT_W, INPUT_H, lb_info);
             cv::cvtColor(input_img, input_img, cv::COLOR_BGR2RGB);
@@ -108,7 +109,7 @@ void ServerWindow::inferenceLoop() {
             auto outputs = this->inference_->run(input_img);
             auto detections = PostProcessor::decode(outputs, CONF_THRESHOLD);
 
-            // 결과 게시 — GUI 스레드는 다음 프레임 그릴 때 이 값을 사용한다.
+            // Publish the result - the GUI thread uses this value when drawing the next frame.
             {
                 std::lock_guard<std::mutex> lock(this->mu_);
                 this->latestDets_ = std::move(detections);
@@ -116,7 +117,7 @@ void ServerWindow::inferenceLoop() {
                 this->hasResult_ = true;
             }
         } catch (const std::exception& e) {
-            std::cerr << "프레임 추론 실패: " << e.what() << std::endl;
+            std::cerr << "Frame inference failed: " << e.what() << std::endl;
         }
 
         this->busy_.store(false, std::memory_order_release);
@@ -124,26 +125,26 @@ void ServerWindow::inferenceLoop() {
 }
 
 void ServerWindow::onFrameReady(const QImage& image) {
-    // QImage(RGB888) → cv::Mat(BGR) 변환. cvtColor가 새 버퍼를 할당하므로
-    // 결과 bgr Mat은 QImage 수명과 독립적이다 (cv::Mat refcount로 관리됨).
+    // Convert QImage(RGB888) -> cv::Mat(BGR). Since cvtColor allocates a new buffer,
+    // the resulting bgr Mat is independent of the QImage lifetime (managed by cv::Mat refcounting).
     QImage rgb = image.convertToFormat(QImage::Format_RGB888);
     cv::Mat rgbMat(rgb.height(), rgb.width(), CV_8UC3,
                    const_cast<uchar*>(rgb.bits()), rgb.bytesPerLine());
     cv::Mat bgr;
     cv::cvtColor(rgbMat, bgr, cv::COLOR_RGB2BGR);
 
-    // 워커가 idle이면 새 프레임을 dispatch. busy면 건너뛴다.
+    // Dispatch a new frame if the worker is idle. Skip it if the worker is busy.
     if (this->inference_ && !this->busy_.load(std::memory_order_acquire)) {
         {
             std::lock_guard<std::mutex> lock(this->mu_);
-            this->pendingFrame_ = bgr;  // cv::Mat은 refcount 공유 — clone 불필요
+            this->pendingFrame_ = bgr;  // cv::Mat shares refcounted storage - no clone needed
             this->hasPending_ = true;
         }
         this->cond_.notify_one();
     }
 
-    // 가장 최근 추론 결과를 현재 프레임 위에 그려 표시한다.
-    // (워커가 추론 중이면 직전 프레임의 결과가 그려지므로 1~2프레임 지연될 수 있다.)
+    // Draw and display the most recent inference result on top of the current frame.
+    // (If the worker is inferring, the previous frame's result is drawn, so a 1-2 frame delay is possible.)
     cv::Mat displayBgr;
     {
         std::lock_guard<std::mutex> lock(this->mu_);
@@ -154,39 +155,40 @@ void ServerWindow::onFrameReady(const QImage& image) {
         }
     }
 
-    // ── RTSP 송출 ─────────────────────────────────────────────────────
-    // 첫 프레임의 해상도가 확정되었을 때 RtspServer + H264Encoder 를 lazy-init.
-    // 이후 매 프레임 인코더에 push 하면 NAL 콜백을 통해 server.sendNal() 로 흘러간다.
+    // ── RTSP streaming ────────────────────────────────────────────────
+    // Lazy-initialize RtspServer + H264Encoder once the first frame resolution is known.
+    // After that, pushing each frame into the encoder reaches server.sendNal() through the NAL callback.
     if (!this->streamingInit_) {
-        // 비디오 caps 에서 추출한 실제 fps 를 사용. 0 이면 (아직 못 읽었거나
-        // 컨테이너에 framerate 가 없으면) 30 fps 로 fallback.
+        // Use the actual fps extracted from the video caps. If it is 0
+        // (not read yet, or the container has no framerate), fall back to 30 fps.
         int fps = this->pipeline_ ? this->pipeline_->fps() : 0;
         if (fps <= 0) fps = 30;
         this->rtspServer_ = std::make_unique<RtspServer>(
             this->rtspPort_, this->rtspPath_,
-            displayBgr.cols, displayBgr.rows, fps);
+            displayBgr.cols, displayBgr.rows, fps,
+            this->rtpTcp_);
         if (!this->rtspServer_->start()) {
-            std::cerr << "RtspServer 시작 실패" << std::endl;
+            std::cerr << "Failed to start RtspServer" << std::endl;
             this->rtspServer_.reset();
         } else {
             this->encoder_ = std::make_unique<H264Encoder>(
                 displayBgr.cols, displayBgr.rows, fps);
-            // NAL 콜백: 인코더가 만드는 access unit(byte-stream, Annex-B start
-            // code 포함, 여러 NAL 이 연속) 을 그대로 RtspServer 에 전달한다.
-            // RtspServer::sendNal 은 한 호출 = 한 frame(AU) 규약이므로
-            // 분할 없이 통째로 넘겨야 appsrc → h264parse → rtph264pay 가
-            // access unit 경계를 정확히 인식한다.
+            // NAL callback: forward the access unit produced by the encoder
+            // (byte-stream, with Annex-B start codes and multiple NALs in sequence) directly to RtspServer.
+            // RtspServer::sendNal uses the rule one call = one frame (AU),
+            // so it must be passed intact without splitting for appsrc -> h264parse -> rtph264pay
+            // to recognize access-unit boundaries correctly.
             RtspServer* serverPtr = this->rtspServer_.get();
             this->encoder_->setNalCallback(
                 [serverPtr](const uint8_t* data, size_t size) {
                     serverPtr->sendNal(data, size);
                 });
             if (!this->encoder_->start()) {
-                std::cerr << "H264Encoder 시작 실패" << std::endl;
+                std::cerr << "Failed to start H264Encoder" << std::endl;
                 this->encoder_.reset();
                 this->rtspServer_.reset();
             } else {
-                std::cout << "RTSP 송출 시작: rtsp://<host>:"
+                std::cout << "RTSP streaming started: rtsp://<host>:"
                           << this->rtspPort_ << this->rtspPath_
                           << std::endl;
             }
@@ -197,7 +199,7 @@ void ServerWindow::onFrameReady(const QImage& image) {
         this->encoder_->pushFrame(displayBgr);
     }
 
-    // [임시 비활성화] BGR → QLabel 표시 생략. 추론·RTSP 송출은 정상 동작.
+    // [Temporarily disabled] Skip BGR -> QLabel display. Inference and RTSP streaming still work normally.
     // cv::Mat displayRgb;
     // cv::cvtColor(displayBgr, displayRgb, cv::COLOR_BGR2RGB);
     // QImage out(displayRgb.data, displayRgb.cols, displayRgb.rows,

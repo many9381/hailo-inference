@@ -8,69 +8,76 @@
 #include <thread>
 #include <vector>
 
+#include <memory>
+
+#include "crypto/AriaCipher.h"
+#include "crypto/ICipher.h"
+#include "rtsp_native/MlKemHandshake.h"
+
 // ----------------------------------------------------------------------------
 // RtspServer
 //
-// GStreamer 의존성 없이 POSIX 소켓만 사용해 직접 구현한 RTSP/RTP H.264 서버.
-// gst-rtsp-server 기반 GstRtspServer 와 정확히 동일한 공개 API 를 제공하므로
-// 호출자 입장에서 드롭-인 교체가 가능하다.
+// RTSP/RTP H.264 server implemented directly with POSIX sockets, without GStreamer dependencies.
+// It provides exactly the same public API as a gst-rtsp-server-based GstRtspServer,
+// so it can be used as a drop-in replacement from the caller's perspective.
 //
-// 내부 구조
+// Internal structure
 //   ┌─────────────────────────┐     ┌──────────────────────────┐
-//   │ accept thread           │     │ 세션 스레드 (클라이언트당) │
-//   │  - TCP listen/accept    │─►──▶│  - RTSP 요청 수신/응답     │
-//   │  - 세션 생성             │     │  - SETUP 시 UDP 소켓 바인드│
+//   │ accept thread           │     │ session thread (per client)│
+//   │  - TCP listen/accept    │─►──▶│  - receive/respond RTSP req│
+//   │  - create session       │     │  - bind UDP socket on SETUP│
 //   └─────────────────────────┘     └──────────────────────────┘
 //                                          ▲
 //                                          │ sendNal()
 //                                          │ (encoder thread)
 //                                          │
 //                               ┌──────────────────┐
-//                               │ RTP 패킷타이저    │
-//                               │ - AU → NAL 분해  │
+//                               │ RTP packetizer    │
+//                               │ - AU -> NAL split │
 //                               │ - Single / FU-A  │
 //                               │ - sendto(UDP)    │
 //                               └──────────────────┘
 //
-// sendNal() 한 번 = 한 access unit(byte-stream Annex-B, start code 포함). 내부
-// 에서 NAL 단위로 쪼갠 뒤 RFC 6184 packetization-mode 1 규칙에 따라 각 PLAY
-// 세션의 클라이언트 RTP 포트로 전송한다.
+// One sendNal() call = one access unit (byte-stream Annex-B, including start codes). Internally,
+// it is split into NAL units and transmitted to each PLAY session's client RTP
+// port according to RFC 6184 packetization-mode 1 rules.
 // ----------------------------------------------------------------------------
 class RtspServer {
 public:
-    RtspServer(int port, std::string mountPoint, int width, int height, int fps);
+    RtspServer(int port, std::string mountPoint, int width, int height, int fps,
+               bool rtpTcp = false);
     ~RtspServer();
 
     RtspServer(const RtspServer&) = delete;
     RtspServer& operator=(const RtspServer&) = delete;
 
-    // RTSP TCP 리스너 및 accept 스레드를 가동한다.
+    // Start the RTSP TCP listener and accept thread.
     bool start();
 
-    // 서버를 정지하고 모든 세션/스레드/소켓을 정리한다. (소멸자에서도 자동 호출)
+    // Stop the server and clean up all sessions/threads/sockets. (Also called automatically by the destructor.)
     void stop();
 
-    // 한 frame 의 access unit(Annex-B byte-stream) 을 모든 PLAY 세션에 전송.
-    // 여러 NAL 이 [start code|NAL][start code|NAL]... 형태로 연속되어 있어야 한다.
-    // PLAY 중인 세션이 없거나 stop 상태면 조용히 무시한다.
+    // Send one frame's access unit (Annex-B byte stream) to all PLAY sessions.
+    // Multiple NALs must be laid out continuously as [start code|NAL][start code|NAL]...
+    // Silently ignore it if there are no PLAY sessions or the server is stopped.
     void sendNal(const uint8_t* nalData, size_t nalSize);
 
 private:
-    // Session 은 세션별 상태(소켓, 주소, 시퀀스 카운터 등) 를 담는 내부 구조체.
-    // 헤더에는 전방 선언만 두고 실제 정의는 .cpp 에 있다. (sockaddr_in 을 헤더에
-    // 노출시키지 않기 위함)
+    // Session is an internal struct that stores per-session state (sockets, addresses, sequence counters, etc.).
+    // Only a forward declaration is kept in the header, and the actual definition is in the .cpp file
+    // (to avoid exposing sockaddr_in in the header).
     struct Session;
 
-    // accept 스레드 본체 — poll() 로 종료 플래그를 주기적으로 확인한다.
+    // Accept-thread body - periodically checks the shutdown flag with poll().
     void acceptLoop();
 
-    // 세션 스레드 본체 — RTSP 요청을 파싱하고 handleRequest() 로 위임한다.
+    // Session-thread body - parses RTSP requests and delegates to handleRequest().
     void sessionLoop(std::shared_ptr<Session> session);
 
-    // 한 개의 완전한 RTSP 요청을 처리한다. false 를 반환하면 세션을 종료한다.
+    // Handle one complete RTSP request. If false is returned, the session is terminated.
     bool handleRequest(Session& s, const std::string& req);
 
-    // ── 응답 빌더 ────────────────────────────────────────────────────────
+    // ── Response builders ───────────────────────────────────────────────
     std::string buildOptionsResponse(int cseq);
     std::string buildDescribeResponse(int cseq, const std::string& uri);
     std::string buildSetupResponse(int cseq, const std::string& sessionId,
@@ -80,34 +87,48 @@ private:
     std::string buildGenericOkResponse(int cseq, const std::string& sessionId);
     std::string buildErrorResponse(int cseq, int code, const std::string& reason);
 
-    // ── RTP 패킷화 헬퍼 ──────────────────────────────────────────────────
-    // 한 NAL 을 Single-NAL-unit 또는 FU-A 모드로 여러 개의 RTP 패킷에 나눠 전송.
+    // ── ML-KEM handshake ────────────────────────────────────────────────
+    bool performKemHandshake(Session& s);
+
+    // ── RTSP encrypted send/receive helpers ─────────────────────────────
+    // Send/receive using [4-byte network-order length][encrypted payload] framing.
+    // Uses the per-session RTSP cipher.
+    bool sendEncrypted(Session& s, const std::string& data);
+    bool sendEncryptedLocked(Session& s, const std::string& data);
+    bool recvEncrypted(Session& s, std::string& data);
+
+    // ── RTP packetization helpers ───────────────────────────────────────
+    // Send one NAL split across multiple RTP packets in Single-NAL-unit or FU-A mode.
     void sendNalToSession(Session& s, uint32_t rtpTs,
                           const uint8_t* nal, size_t size, bool lastNal);
 
-    // 한 개의 RTP 패킷을 UDP 로 송신.
+    // Send one RTP packet over UDP.
     void sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
                        const uint8_t* payload, size_t size);
 
-    // ── 설정값 ────────────────────────────────────────────────────────────
+    // ── Configuration values ────────────────────────────────────────────
     int         port_;
     std::string mountPoint_;
-    int         width_;   // SDP/로그 출력용
+    int         width_;   // For SDP/log output
     int         height_;
     int         fps_;
+    bool        rtpTcp_;  // true: TCP interleaved, false: UDP
 
-    // ── 소켓/스레드 ──────────────────────────────────────────────────────
+    // ── Sockets/threads ─────────────────────────────────────────────────
     int               listenFd_ = -1;
     std::thread       acceptThread_;
     std::atomic<bool> running_{false};
 
-    // ── 세션 관리 ────────────────────────────────────────────────────────
-    // sessionsMu_ 는 sessions_/sessionThreads_ 및 각 Session 의 소켓/전송 상태
-    // (udpFd, clientRtpAddr, seq) 를 함께 보호한다.
+    // ── Session management ──────────────────────────────────────────────
+    // sessionsMu_ protects sessions_/sessionThreads_ along with each Session's
+    // socket/transport state (udpFd, clientRtpAddr, seq).
     std::mutex                            sessionsMu_;
     std::vector<std::shared_ptr<Session>> sessions_;
     std::vector<std::thread>              sessionThreads_;
 
-    // ── 전송 카운터 ──────────────────────────────────────────────────────
-    uint64_t frameIndex_ = 0;  // 90kHz RTP 타임스탬프 계산용 frame 카운터
+    // ── Transmission counter ────────────────────────────────────────────
+    uint64_t frameIndex_ = 0;  // Frame counter used to compute the 90 kHz RTP timestamp
+
+    // ── SRTP authentication tag length ──────────────────────────────────
+    static constexpr size_t kSrtpAuthTagLen = 10;  // RFC 3711: 80-bit truncated HMAC-SHA1
 };

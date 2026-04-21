@@ -17,32 +17,47 @@
 #include <random>
 #include <sstream>
 
+#include <openssl/hmac.h>
+
+#include "rtsp_native/MlKemHandshake.h"
+
 // ============================================================================
-// 생성자 / 소멸자
+// Constructor / destructor
 // ============================================================================
-RtspClient::RtspClient(QObject* parent) : QObject(parent) {}
+RtspClient::RtspClient(bool rtpTcp, QObject* parent)
+    : QObject(parent), rtpTcp_(rtpTcp) {}
 
 RtspClient::~RtspClient() {
     this->stop();
 }
 
 // ============================================================================
-// start — URL 파싱 → 제어 연결 → RTP 바인드 → 시그널링 → 수신 루프 가동
+// start - URL parsing -> control connection -> RTP bind -> signaling -> start receive loop
 // ============================================================================
 bool RtspClient::start(const std::string& url) {
     this->stop();
 
     if (!this->parseUrl(url)) {
-        qWarning() << "[RtspClient] URL 파싱 실패:" << url.c_str();
+        qWarning() << "[RtspClient] Failed to parse URL:" << url.c_str();
         return false;
     }
     this->baseUrl_ = url;
 
     if (!this->openControl()) return false;
-    if (!this->bindRtpSocket()) {
+
+    // ML-KEM handshake - perform key exchange before RTSP signaling
+    if (!this->performKemHandshake()) {
         ::close(this->controlFd_);
         this->controlFd_ = -1;
         return false;
+    }
+
+    if (!this->rtpTcp_) {
+        if (!this->bindRtpSocket()) {
+            ::close(this->controlFd_);
+            this->controlFd_ = -1;
+            return false;
+        }
     }
     if (!this->performSignaling()) {
         if (this->rtpFd_     >= 0) { ::close(this->rtpFd_);     this->rtpFd_     = -1; }
@@ -50,15 +65,25 @@ bool RtspClient::start(const std::string& url) {
         return false;
     }
 
+    // In TCP mode, remove the recv timeout from controlFd_
+    // so interleaved RTP reception is not blocked.
+    // (rtpLoop termination is handled by the running_ flag + socket close.)
+    if (this->rtpTcp_) {
+        timeval tv{};
+        tv.tv_sec  = 0;
+        tv.tv_usec = 0;  // Wait indefinitely
+        ::setsockopt(this->controlFd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
     this->running_.store(true);
     this->rtpThread_ = std::thread([this] { this->rtpLoop(); });
 
-    qInfo() << "[RtspClient] 연결 시작:" << url.c_str();
+    qInfo() << "[RtspClient] Connection started:" << url.c_str();
     return true;
 }
 
 // ============================================================================
-// stop — 수신 스레드 종료 후 소켓 정리
+// stop - clean up sockets after stopping the receive thread
 // ============================================================================
 void RtspClient::stop() {
     this->running_.store(false);
@@ -69,8 +94,8 @@ void RtspClient::stop() {
         this->rtpFd_ = -1;
     }
     if (this->controlFd_ >= 0) {
-        // 가능하면 TEARDOWN 을 보내고 싶지만 타임아웃/오류 처리가 번거로우므로
-        // 여기서는 단순히 소켓만 닫는다. 서버측 세션 타임아웃에 의해 정리된다.
+        // Ideally TEARDOWN would be sent, but timeout/error handling is cumbersome,
+        // so only the socket is closed here. Cleanup happens via the server-side session timeout.
         ::close(this->controlFd_);
         this->controlFd_ = -1;
     }
@@ -79,10 +104,15 @@ void RtspClient::stop() {
     this->cseq_         = 1;
     this->fuBuffer_.clear();
     this->fuInProgress_ = false;
+
+    // Reset ML-KEM-derived keys
+    this->srtpCipher_.reset();
+    this->rtspCipher_.reset();
+    this->srtpAuthKey_.clear();
 }
 
 // ============================================================================
-// parseUrl — "rtsp://host[:port]/path" 분해
+// parseUrl - split "rtsp://host[:port]/path"
 // ============================================================================
 bool RtspClient::parseUrl(const std::string& url) {
     const std::string prefix = "rtsp://";
@@ -108,7 +138,7 @@ bool RtspClient::parseUrl(const std::string& url) {
 }
 
 // ============================================================================
-// openControl — TCP 연결 + getaddrinfo 로 호스트 해석
+// openControl - TCP connect + host resolution via getaddrinfo
 // ============================================================================
 bool RtspClient::openControl() {
     addrinfo hints{};
@@ -119,25 +149,25 @@ bool RtspClient::openControl() {
     std::snprintf(portBuf, sizeof(portBuf), "%d", this->port_);
     int gai = ::getaddrinfo(this->host_.c_str(), portBuf, &hints, &res);
     if (gai != 0 || !res) {
-        qWarning() << "[RtspClient] getaddrinfo 실패:" << gai_strerror(gai);
+        qWarning() << "[RtspClient] getaddrinfo failed:" << gai_strerror(gai);
         return false;
     }
 
     int fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) {
         ::freeaddrinfo(res);
-        qWarning() << "[RtspClient] socket 실패:" << std::strerror(errno);
+        qWarning() << "[RtspClient] socket failed:" << std::strerror(errno);
         return false;
     }
     if (::connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-        qWarning() << "[RtspClient] connect 실패:" << std::strerror(errno);
+        qWarning() << "[RtspClient] connect failed:" << std::strerror(errno);
         ::close(fd);
         ::freeaddrinfo(res);
         return false;
     }
     ::freeaddrinfo(res);
 
-    // send/recv 에 timeout 을 걸어 네트워크 장애 시 stop() 이 오래 블로킹되지 않도록 한다.
+    // Apply send/recv timeouts so stop() does not block for too long on network failures.
     timeval tv{};
     tv.tv_sec  = 2;
     tv.tv_usec = 0;
@@ -149,21 +179,39 @@ bool RtspClient::openControl() {
 }
 
 // ============================================================================
-// bindRtpSocket — 클라이언트 RTP 수신용 UDP 소켓 생성 (임시 포트 자동 할당)
+// performKemHandshake - perform ML-KEM-based key exchange and configure the client-side keys
+// ============================================================================
+bool RtspClient::performKemHandshake() {
+    MlKemHandshake hs;
+    if (!hs.performClientHandshake(this->controlFd_)) {
+        qWarning() << "[RtspClient] ML-KEM handshake failed";
+        return false;
+    }
+
+    this->srtpCipher_ = hs.createSrtpCipher();
+    this->rtspCipher_ = hs.createRtspCipher();
+    this->srtpAuthKey_ = hs.srtpAuthKey();
+
+    qInfo() << "[RtspClient] ML-KEM handshake completed";
+    return true;
+}
+
+// ============================================================================
+// bindRtpSocket - create the UDP socket used to receive client RTP (temporary port assigned automatically)
 // ============================================================================
 bool RtspClient::bindRtpSocket() {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        qWarning() << "[RtspClient] UDP socket 실패:" << std::strerror(errno);
+        qWarning() << "[RtspClient] UDP socket failed:" << std::strerror(errno);
         return false;
     }
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port        = 0;  // 커널에 맡김
+    addr.sin_port        = 0;  // Let the kernel choose
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        qWarning() << "[RtspClient] UDP bind 실패:" << std::strerror(errno);
+        qWarning() << "[RtspClient] UDP bind failed:" << std::strerror(errno);
         ::close(fd);
         return false;
     }
@@ -171,7 +219,7 @@ bool RtspClient::bindRtpSocket() {
     ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrLen);
     this->clientRtpPort_ = ntohs(addr.sin_port);
 
-    // RTP 수신 타임아웃 — running_ 플래그를 주기적으로 확인하기 위함.
+    // RTP receive timeout - used to check the running_ flag periodically.
     timeval tv{};
     tv.tv_sec  = 0;
     tv.tv_usec = 300 * 1000;  // 300ms
@@ -182,53 +230,71 @@ bool RtspClient::bindRtpSocket() {
 }
 
 // ============================================================================
-// sendRequest — 한 개의 RTSP 요청을 보내고 응답을 한 메시지까지 수신
+// sendRequest - send one RTSP request and receive one response message
 // ============================================================================
 bool RtspClient::sendRequest(const std::string& req, std::string* response) {
-    if (::send(this->controlFd_, req.data(), req.size(), 0) < 0) {
-        qWarning() << "[RtspClient] send 실패:" << std::strerror(errno);
+    // ── Encrypt with the ML-KEM-derived RTSP cipher and send with a length prefix ──
+    std::vector<uint8_t> encBuf(req.begin(), req.end());
+    this->rtspCipher_->encrypt(encBuf.data(), encBuf.size());
+
+    uint32_t netLen = htonl(static_cast<uint32_t>(encBuf.size()));
+    if (::send(this->controlFd_, &netLen, 4, 0) != 4) {
+        qWarning() << "[RtspClient] Failed to send length";
         return false;
     }
-
-    // 응답을 "\r\n\r\n" 까지 수신. Content-Length 가 있으면 그만큼 더 읽는다.
-    std::string buffer;
-    char        chunk[2048];
-    size_t      headerEnd = std::string::npos;
-    while (true) {
-        ssize_t n = ::recv(this->controlFd_, chunk, sizeof(chunk), 0);
-        if (n <= 0) {
-            qWarning() << "[RtspClient] recv 실패:" << std::strerror(errno);
-            return false;
-        }
-        buffer.append(chunk, chunk + n);
-        headerEnd = buffer.find("\r\n\r\n");
-        if (headerEnd != std::string::npos) break;
-    }
-
-    // Content-Length 추출 (있으면 본문까지 다 받는다).
-    size_t contentLen = 0;
     {
-        std::string lower = buffer.substr(0, headerEnd);
-        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        size_t p = lower.find("content-length:");
-        if (p != std::string::npos) {
-            contentLen = static_cast<size_t>(std::atoi(lower.c_str() + p + 15));
+        size_t sent = 0;
+        while (sent < encBuf.size()) {
+            ssize_t n = ::send(this->controlFd_, encBuf.data() + sent,
+                               encBuf.size() - sent, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] send failed:" << std::strerror(errno);
+                return false;
+            }
+            sent += static_cast<size_t>(n);
         }
     }
 
-    size_t totalNeeded = headerEnd + 4 + contentLen;
-    while (buffer.size() < totalNeeded) {
-        ssize_t n = ::recv(this->controlFd_, chunk, sizeof(chunk), 0);
-        if (n <= 0) return false;
-        buffer.append(chunk, chunk + n);
+    // ── Receive the encrypted response using length-prefix framing ─────────────────────────
+    uint32_t respNetLen = 0;
+    {
+        size_t received = 0;
+        while (received < 4) {
+            ssize_t n = ::recv(this->controlFd_,
+                               reinterpret_cast<char*>(&respNetLen) + received,
+                               4 - received, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] Failed to receive length";
+                return false;
+            }
+            received += static_cast<size_t>(n);
+        }
     }
 
-    *response = buffer;
+    uint32_t respLen = ntohl(respNetLen);
+    if (respLen == 0 || respLen > 65536) return false;
+
+    std::vector<uint8_t> respBuf(respLen);
+    {
+        size_t received = 0;
+        while (received < respLen) {
+            ssize_t n = ::recv(this->controlFd_, respBuf.data() + received,
+                               respLen - received, 0);
+            if (n <= 0) {
+                qWarning() << "[RtspClient] recv failed:" << std::strerror(errno);
+                return false;
+            }
+            received += static_cast<size_t>(n);
+        }
+    }
+
+    this->rtspCipher_->decrypt(respBuf.data(), respBuf.size());
+    response->assign(respBuf.begin(), respBuf.end());
     return true;
 }
 
 // ============================================================================
-// performSignaling — OPTIONS → DESCRIBE → SETUP → PLAY 순서로 대화
+// performSignaling - communicate in the order OPTIONS -> DESCRIBE -> SETUP -> PLAY
 // ============================================================================
 bool RtspClient::performSignaling() {
     auto makeLine = [](const char* method, const std::string& url, int cseq,
@@ -251,7 +317,7 @@ bool RtspClient::performSignaling() {
                                     this->cseq_++, "", "");
         if (!this->sendRequest(req, &response)) return false;
         if (response.find("RTSP/1.0 200") == std::string::npos) {
-            qWarning() << "[RtspClient] OPTIONS 실패";
+            qWarning() << "[RtspClient] OPTIONS failed";
             return false;
         }
     }
@@ -262,41 +328,45 @@ bool RtspClient::performSignaling() {
                                     this->cseq_++, "", "Accept: application/sdp\r\n");
         if (!this->sendRequest(req, &response)) return false;
         if (response.find("RTSP/1.0 200") == std::string::npos) {
-            qWarning() << "[RtspClient] DESCRIBE 실패:\n" << response.c_str();
+            qWarning() << "[RtspClient] DESCRIBE failed:\n" << response.c_str();
             return false;
         }
     }
 
-    // SETUP 은 control attribute 를 이용해 <baseUrl>/trackID=0 으로 보내는 것이
-    // 가장 호환성 좋다. 서버가 control 을 다르게 주더라도 우리는 고정 URL 을
-    // 시도한다 (서버가 "a=control:trackID=0" 을 쓰는 관례에 맞춤).
+    // For SETUP, sending to <baseUrl>/trackID=0 using the control attribute
+    // is the most compatible approach. Even if the server advertises a different control,
+    // we try the fixed URL to match the common "a=control:trackID=0" convention.
     std::string setupUrl = this->baseUrl_ + "/trackID=0";
 
     // ── SETUP ────────────────────────────────────────────────────────────
     {
         std::ostringstream tr;
-        tr << "Transport: RTP/AVP;unicast;client_port="
-           << this->clientRtpPort_ << "-" << (this->clientRtpPort_ + 1) << "\r\n";
+        if (this->rtpTcp_) {
+            tr << "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n";
+        } else {
+            tr << "Transport: RTP/AVP;unicast;client_port="
+               << this->clientRtpPort_ << "-" << (this->clientRtpPort_ + 1) << "\r\n";
+        }
         std::string req = makeLine("SETUP", setupUrl, this->cseq_++, "", tr.str());
         if (!this->sendRequest(req, &response)) return false;
         if (response.find("RTSP/1.0 200") == std::string::npos) {
-            qWarning() << "[RtspClient] SETUP 실패:\n" << response.c_str();
+            qWarning() << "[RtspClient] SETUP failed:\n" << response.c_str();
             return false;
         }
-        // Session 헤더 파싱.
+        // Parse the Session header.
         size_t sp = response.find("Session:");
         if (sp == std::string::npos) sp = response.find("session:");
         if (sp != std::string::npos) {
             size_t lineEnd = response.find("\r\n", sp);
             std::string line = response.substr(sp + 8, lineEnd - (sp + 8));
-            // 앞쪽 공백 제거
+            // Trim leading whitespace
             size_t start = line.find_first_not_of(" \t");
             if (start != std::string::npos) line = line.substr(start);
             size_t semi = line.find(';');
             this->sessionId_ = (semi == std::string::npos) ? line : line.substr(0, semi);
         }
         if (this->sessionId_.empty()) {
-            qWarning() << "[RtspClient] SETUP 응답에 Session 없음";
+            qWarning() << "[RtspClient] No Session found in SETUP response";
             return false;
         }
     }
@@ -308,7 +378,7 @@ bool RtspClient::performSignaling() {
                                     "Range: npt=0.000-\r\n");
         if (!this->sendRequest(req, &response)) return false;
         if (response.find("RTSP/1.0 200") == std::string::npos) {
-            qWarning() << "[RtspClient] PLAY 실패:\n" << response.c_str();
+            qWarning() << "[RtspClient] PLAY failed:\n" << response.c_str();
             return false;
         }
     }
@@ -317,54 +387,107 @@ bool RtspClient::performSignaling() {
 }
 
 // ============================================================================
-// rtpLoop — UDP 패킷을 읽어 RTP 헤더를 벗기고 NAL 페이로드를 처리
+// recvFull - receive exactly the specified number of bytes (internal helper)
+// ============================================================================
+static bool recvFull(int fd, void* buf, size_t len) {
+    size_t received = 0;
+    while (received < len) {
+        ssize_t n = ::recv(fd, static_cast<char*>(buf) + received,
+                           len - received, 0);
+        if (n <= 0) return false;
+        received += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// ============================================================================
+// rtpLoop - receive SRTP packets (UDP or TCP interleaved)
+//
+// SRTP packet structure:
+//   [RTP Header (12B)] [Encrypted Payload] [Auth Tag (10B)]
+//
+// After receiving, verify the authentication tag and decrypt the payload if verification succeeds.
 // ============================================================================
 void RtspClient::rtpLoop() {
     uint8_t buf[2048];
-    while (this->running_.load()) {
-        ssize_t n = ::recv(this->rtpFd_, buf, sizeof(buf), 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (n < 12) continue;  // RTP 헤더 최소 크기
 
-        // RTP 헤더 파싱
-        //   byte 0: V(2) | P | X | CC(4)
-        //   byte 1: M    | PT(7)
-        //   CSRC list: 4 * CC bytes (skip)
-        //   extension header 가 있으면 X=1, 그 크기는 가변.
+    while (this->running_.load()) {
+        ssize_t n;
+        size_t  srtpLen;
+
+        if (this->rtpTcp_) {
+            // TCP interleaved: $ + channel(1) + length(2) + SRTP packet
+            uint8_t header[4];
+            if (!recvFull(this->controlFd_, header, 4)) break;
+            if (header[0] != '$') break;  // Protocol error
+            // header[1] = channel (ignored - single stream)
+            srtpLen = (static_cast<size_t>(header[2]) << 8) | header[3];
+            if (srtpLen == 0 || srtpLen > sizeof(buf)) break;
+            if (!recvFull(this->controlFd_, buf, srtpLen)) break;
+            n = static_cast<ssize_t>(srtpLen);
+        } else {
+            // UDP
+            n = ::recv(this->rtpFd_, buf, sizeof(buf), 0);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                if (errno == EINTR) continue;
+                break;
+            }
+        }
+
+        // Minimum SRTP size: RTP header (12) + auth tag (10)
+        if (static_cast<size_t>(n) < 12 + kSrtpAuthTagLen) continue;
+
+        size_t pktLen = static_cast<size_t>(n);
+
+        // ── SRTP authentication tag verification ─────────────────────────────────
+        size_t rtpLen = pktLen - kSrtpAuthTagLen;
+        const uint8_t* receivedTag = buf + rtpLen;
+
+        unsigned int hmacLen = 0;
+        uint8_t hmacBuf[20];  // SHA1 = 20 bytes
+        HMAC(EVP_sha1(),
+             this->srtpAuthKey_.data(),
+             static_cast<int>(this->srtpAuthKey_.size()),
+             buf, rtpLen,
+             hmacBuf, &hmacLen);
+
+        if (std::memcmp(hmacBuf, receivedTag, kSrtpAuthTagLen) != 0) {
+            qWarning() << "[RtspClient] SRTP authentication tag mismatch - dropping packet";
+            continue;
+        }
+
+        // ── RTP header parsing (after authentication passes) ─────────────────────
         uint8_t v0 = buf[0];
         int     cc = v0 & 0x0F;
         bool    x  = (v0 & 0x10) != 0;
         size_t  headerLen = 12 + static_cast<size_t>(cc) * 4;
-        if (static_cast<size_t>(n) < headerLen) continue;
+        if (rtpLen < headerLen) continue;
 
         if (x) {
-            // 확장 헤더: [profile(2)][length(2)] + length*4 bytes
-            if (static_cast<size_t>(n) < headerLen + 4) continue;
+            if (rtpLen < headerLen + 4) continue;
             uint16_t extLen = (static_cast<uint16_t>(buf[headerLen + 2]) << 8) |
                               buf[headerLen + 3];
             headerLen += 4 + static_cast<size_t>(extLen) * 4;
-            if (static_cast<size_t>(n) < headerLen) continue;
+            if (rtpLen < headerLen) continue;
         }
 
-        const uint8_t* payload = buf + headerLen;
-        size_t         payloadSize = static_cast<size_t>(n) - headerLen;
+        uint8_t* payload = buf + headerLen;
+        size_t   payloadSize = rtpLen - headerLen;
         if (payloadSize == 0) continue;
+        this->srtpCipher_->decrypt(payload, payloadSize);
         this->handleRtpPayload(payload, payloadSize);
     }
 }
 
 // ============================================================================
-// handleRtpPayload — RFC 6184 single-NAL / FU-A / STAP-A 분기 및 emit
+// handleRtpPayload - branch and emit RFC 6184 single-NAL / FU-A / STAP-A payloads
 // ============================================================================
 void RtspClient::handleRtpPayload(const uint8_t* payload, size_t size) {
     const uint8_t nalType = payload[0] & 0x1F;
 
     if (nalType >= 1 && nalType <= 23) {
-        // Single NAL unit — payload 전체가 하나의 NAL (헤더 바이트 포함).
+        // Single NAL unit - the entire payload is one NAL (including the header byte).
         QByteArray nal(reinterpret_cast<const char*>(payload),
                        static_cast<int>(size));
         emit this->nalReceived(nal);
@@ -388,7 +511,7 @@ void RtspClient::handleRtpPayload(const uint8_t* payload, size_t size) {
     }
 
     if (nalType == 28) {
-        // FU-A 재조립.
+        // FU-A reassembly.
         //   payload[0] = FU indicator (F|NRI|type=28)
         //   payload[1] = FU header    (S|E|R|original_type)
         if (size < 2) return;
@@ -399,8 +522,8 @@ void RtspClient::handleRtpPayload(const uint8_t* payload, size_t size) {
         const uint8_t type  = fuHeader & 0x1F;
 
         if (start) {
-            // 원래 NAL 의 header 바이트를 재구성: F/NRI 는 FU indicator 에서,
-            // type 은 FU header 에서 가져온다.
+            // Reconstruct the original NAL header byte: F/NRI comes from the FU indicator,
+            // and type comes from the FU header.
             this->fuBuffer_.clear();
             this->fuBuffer_.push_back(static_cast<uint8_t>(
                 (fuIndicator & 0xE0) | (type & 0x1F)));
@@ -408,7 +531,7 @@ void RtspClient::handleRtpPayload(const uint8_t* payload, size_t size) {
         }
         if (!this->fuInProgress_) return;
 
-        // 조각 본문(두 헤더 바이트 이후) 을 버퍼에 덧붙인다.
+        // Append the fragment body (after the two header bytes) to the buffer.
         this->fuBuffer_.insert(this->fuBuffer_.end(),
                                 payload + 2, payload + size);
 
@@ -422,5 +545,5 @@ void RtspClient::handleRtpPayload(const uint8_t* payload, size_t size) {
         return;
     }
 
-    // 그 외 타입(FU-B, STAP-B 등) 은 이 구현 범위에서 무시한다.
+    // Other types (FU-B, STAP-B, etc.) are ignored in this implementation.
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -19,6 +20,7 @@ class ClientWindow : public QMainWindow {
 public:
     explicit ClientWindow(const std::string& serverIp,
                           int rtsp_port, const std::string& rtsp_path,
+                          bool rtp_tcp = false,
                           QWidget* parent = nullptr);
     ~ClientWindow() override;
 
@@ -34,17 +36,19 @@ private:
     QWidget*      central_       = nullptr;
     QVBoxLayout*  mainLayout_    = nullptr;
     QHBoxLayout*  controlLayout_ = nullptr;
-    QLineEdit*    ipEdit_        = nullptr;
-    QPushButton*  connectBtn_    = nullptr;
-    QPushButton*  disconnectBtn_ = nullptr;
-    QLabel*       statusLabel_   = nullptr;
-    QLabel*       videoLabel_    = nullptr;
+    QLineEdit*    ipEdit_         = nullptr;
+    QComboBox*    transportCombo_ = nullptr;
+    QPushButton*  connectBtn_     = nullptr;
+    QPushButton*  disconnectBtn_  = nullptr;
+    QLabel*       statusLabel_    = nullptr;
+    QLabel*       videoLabel_     = nullptr;
 
-    // RTSP 연결 설정
+    // RTSP connection settings
     int         rtspPort_ = 8554;
     std::string rtspPath_ = "/stream";
+    bool        rtpTcp_   = false;
 
-    // RTSP 수신 (native socket) + NAL 디코더 (GStreamer)
+    // RTSP receiver (native socket) + NAL decoder (GStreamer)
     RtspClient*         rtspClient_ = nullptr;
     NalDecoderPipeline* decoder_    = nullptr;
 };
