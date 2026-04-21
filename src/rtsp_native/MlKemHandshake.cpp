@@ -12,7 +12,7 @@
 #include "crypto/AriaCipher.h"
 
 // ============================================================================
-// 소켓 송수신 헬퍼
+// Socket send/receive helpers
 // ============================================================================
 
 bool MlKemHandshake::sendAll(int fd, const void* buf, size_t len) {
@@ -38,7 +38,7 @@ bool MlKemHandshake::recvAll(int fd, void* buf, size_t len) {
 }
 
 // ============================================================================
-// 핸드셰이크 메시지 송수신
+// Handshake message send/receive
 // ============================================================================
 
 bool MlKemHandshake::sendHandshakeMsg(int fd, uint8_t msgType,
@@ -61,10 +61,10 @@ bool MlKemHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
     std::vector<uint8_t> msg(msgSize);
     if (!recvAll(fd, msg.data(), msgSize)) return false;
 
-    // 메시지 타입 검증
+    // Validate the message type
     if (msg[0] != expectedType) return false;
 
-    // 버전 검증
+    // Validate the version
     uint16_t version = (static_cast<uint16_t>(msg[1]) << 8) | msg[2];
     if (version != kHandshakeVersion) return false;
 
@@ -74,12 +74,12 @@ bool MlKemHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
 }
 
 // ============================================================================
-// 키 유도 (HKDF-SHA256)
+// Key derivation (HKDF-SHA256)
 //
-// salt    = client_random || server_random  (64 바이트)
-// ikm     = shared_secret                  (32 바이트)
+// salt    = client_random || server_random  (64 bytes)
+// ikm     = shared_secret                  (32 bytes)
 // info    = "hailo-kem-srtp-keys"
-// output  = srtp_key(16) + srtp_iv(16) + srtp_auth_key(20) + rtsp_key(16) + rtsp_iv(16) = 84 바이트
+// output  = srtp_key(16) + srtp_iv(16) + srtp_auth_key(20) + rtsp_key(16) + rtsp_iv(16) = 84 bytes
 // ============================================================================
 
 bool MlKemHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
@@ -90,10 +90,10 @@ bool MlKemHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
     std::memcpy(salt.data(), clientRandom, kRandomSize);
     std::memcpy(salt.data() + kRandomSize, serverRandom, kRandomSize);
 
-    // info = 고정 라벨
+    // info = fixed label
     const char* label = "hailo-kem-srtp-keys";
 
-    // 총 필요한 키 재료: 16 + 16 + 20 + 16 + 16 = 84 바이트
+    // Total key material required: 16 + 16 + 20 + 16 + 16 = 84 bytes
     constexpr size_t totalKeyLen = kSrtpKeySize + kSrtpIvSize + kSrtpAuthKeySize
                                  + kRtspKeySize + kRtspIvSize;
 
@@ -122,7 +122,7 @@ bool MlKemHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
     EVP_KDF_CTX_free(kctx);
     if (rc != 1) return false;
 
-    // 키 재료를 분배
+    // Split the key material
     size_t offset = 0;
 
     srtpKey_.assign(okm.begin() + offset, okm.begin() + offset + kSrtpKeySize);
@@ -144,21 +144,21 @@ bool MlKemHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
 }
 
 // ============================================================================
-// 서버측 핸드셰이크 (ML-KEM-768)
+// Server-side handshake (ML-KEM-768)
 //
-// 1. ML-KEM 키 쌍 생성 (OpenSSL EVP)
-// 2. ServerHello 송신 (server_random + ml_kem_pk)
-// 3. ClientHello 수신 (client_random + ml_kem_ct)
-// 4. 역캡슐화로 공유 비밀 복원
-// 5. 키 유도
+// 1. Generate ML-KEM key pair (OpenSSL EVP)
+// 2. Send ServerHello (server_random + ml_kem_pk)
+// 3. Receive ClientHello (client_random + ml_kem_ct)
+// 4. Recover the shared secret by decapsulation
+// 5. Derive keys
 // ============================================================================
 
 bool MlKemHandshake::performServerHandshake(int fd) {
-    // 1. ML-KEM-768 키 쌍 생성
+    // 1. Generate the ML-KEM-768 key pair
     EVP_PKEY* pkey = EVP_PKEY_Q_keygen(nullptr, nullptr, kMlKemAlg);
     if (!pkey) return false;
 
-    // 공개 키 추출
+    // Extract the public key
     std::vector<uint8_t> pk(kMlKemPublicKeyBytes);
     size_t pkLen = kMlKemPublicKeyBytes;
     if (EVP_PKEY_get_raw_public_key(pkey, pk.data(), &pkLen) != 1
@@ -167,7 +167,7 @@ bool MlKemHandshake::performServerHandshake(int fd) {
         return false;
     }
 
-    // 2. ServerHello 송신 (server_random + pk)
+    // 2. Send ServerHello (server_random + pk)
     uint8_t serverRandom[kRandomSize];
     if (RAND_bytes(serverRandom, kRandomSize) != 1) {
         EVP_PKEY_free(pkey);
@@ -179,7 +179,7 @@ bool MlKemHandshake::performServerHandshake(int fd) {
         return false;
     }
 
-    // 3. ClientHello 수신 (client_random + ct)
+    // 3. Receive ClientHello (client_random + ct)
     uint8_t clientRandom[kRandomSize];
     std::vector<uint8_t> ct(kMlKemCiphertextBytes);
     if (!recvHandshakeMsg(fd, kClientHello, clientRandom,
@@ -188,7 +188,7 @@ bool MlKemHandshake::performServerHandshake(int fd) {
         return false;
     }
 
-    // 4. 역캡슐화 → 공유 비밀
+    // 4. Decapsulation -> shared secret
     EVP_PKEY_CTX* dctx = EVP_PKEY_CTX_new_from_pkey(nullptr, pkey, nullptr);
     EVP_PKEY_free(pkey);
     if (!dctx) return false;
@@ -213,33 +213,33 @@ bool MlKemHandshake::performServerHandshake(int fd) {
     }
     EVP_PKEY_CTX_free(dctx);
 
-    // 5. 키 유도
+    // 5. Derive keys
     return deriveKeys(sharedSecret, clientRandom, serverRandom);
 }
 
 // ============================================================================
-// 클라이언트측 핸드셰이크 (ML-KEM-768)
+// Client-side handshake (ML-KEM-768)
 //
-// 1. ServerHello 수신 (server_random + ml_kem_pk)
-// 2. 캡슐화 → (암호문, 공유 비밀)
-// 3. ClientHello 송신 (client_random + ml_kem_ct)
-// 4. 키 유도
+// 1. Receive ServerHello (server_random + ml_kem_pk)
+// 2. Encapsulation -> (ciphertext, shared secret)
+// 3. Send ClientHello (client_random + ml_kem_ct)
+// 4. Derive keys
 // ============================================================================
 
 bool MlKemHandshake::performClientHandshake(int fd) {
-    // 1. ServerHello 수신 (server_random + pk)
+    // 1. Receive ServerHello (server_random + pk)
     uint8_t serverRandom[kRandomSize];
     std::vector<uint8_t> pk(kMlKemPublicKeyBytes);
     if (!recvHandshakeMsg(fd, kServerHello, serverRandom,
                           pk.data(), kMlKemPublicKeyBytes))
         return false;
 
-    // 2. 수신한 공개 키로 EVP_PKEY 복원
+    // 2. Reconstruct EVP_PKEY from the received public key
     EVP_PKEY* peer = EVP_PKEY_new_raw_public_key_ex(
         nullptr, kMlKemAlg, nullptr, pk.data(), kMlKemPublicKeyBytes);
     if (!peer) return false;
 
-    // 캡슐화 → (암호문, 공유 비밀)
+    // Encapsulation -> (ciphertext, shared secret)
     EVP_PKEY_CTX* ectx = EVP_PKEY_CTX_new_from_pkey(nullptr, peer, nullptr);
     EVP_PKEY_free(peer);
     if (!ectx) return false;
@@ -264,19 +264,19 @@ bool MlKemHandshake::performClientHandshake(int fd) {
     }
     EVP_PKEY_CTX_free(ectx);
 
-    // 3. ClientHello 송신 (client_random + ct)
+    // 3. Send ClientHello (client_random + ct)
     uint8_t clientRandom[kRandomSize];
     if (RAND_bytes(clientRandom, kRandomSize) != 1) return false;
     if (!sendHandshakeMsg(fd, kClientHello, clientRandom,
                           ct.data(), kMlKemCiphertextBytes))
         return false;
 
-    // 4. 키 유도
+    // 4. Derive keys
     return deriveKeys(sharedSecret, clientRandom, serverRandom);
 }
 
 // ============================================================================
-// Cipher 팩토리
+// Cipher factory
 // ============================================================================
 
 std::unique_ptr<ICipher> MlKemHandshake::createSrtpCipher() const {

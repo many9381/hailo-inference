@@ -96,8 +96,8 @@ void configureMacOSPluginSearchPath() {
 }
 
 void preferGtk4PluginFeatures() {
-    // macOS에서는 gtk3 플러그인을 스캔 단계에서 제외하고,
-    // 남은 gtk4 sink를 자동 선택 가능한 후보로 유지한다.
+    // On macOS, exclude the gtk3 plugin during scanning
+    // and keep the remaining gtk4 sink as an auto-selectable candidate.
     g_setenv("GST_PLUGIN_FEATURE_RANK",
              "gtksink:NONE,"
              "gtkglsink:NONE,"

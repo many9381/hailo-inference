@@ -1,6 +1,6 @@
 #pragma once
 
-// GStreamer 타입 전방 선언 (Qt signals 매크로와 이름 충돌 방지).
+// Forward declarations for GStreamer types (to avoid name conflicts with Qt signals macros).
 typedef struct _GstElement  GstElement;
 typedef struct _GstAppSink  GstAppSink;
 
@@ -13,10 +13,10 @@ typedef struct _GstAppSink  GstAppSink;
 // ----------------------------------------------------------------------------
 // NalDecoderPipeline
 //
-// GStreamer appsrc 기반 H.264 NAL 디코더.
-// RtspClient 가 수신한 raw NAL 을 pushNal() 로 넣으면 내부 파이프라인이
+// H.264 NAL decoder based on GStreamer appsrc.
+// When RtspClient pushes a received raw NAL through pushNal(), the internal pipeline
 //   appsrc → h264parse → avdec_h264 → videoconvert → appsink
-// 을 통해 디코딩하고, frameReady 시그널로 RGB QImage 를 전달한다.
+// decodes it and delivers an RGB QImage through the frameReady signal.
 // ----------------------------------------------------------------------------
 class NalDecoderPipeline : public QObject {
     Q_OBJECT
@@ -28,7 +28,7 @@ public:
     bool start();
     void stop();
 
-    // Annex-B start code 없는 raw NAL 한 단위를 파이프라인에 주입.
+    // Push a single raw NAL unit without an Annex-B start code into the pipeline.
     void pushNal(const QByteArray& nal);
 
 signals:

@@ -4,18 +4,18 @@
 #include <cstring>
 
 // ============================================================================
-// ARIA 코어 엔진
+// ARIA core engine
 //
-// OpenSSL small-footprint 구현 방식을 참고하여 바이트 단위 S-Box 및
-// 명확한 치환(SL)/확산(A) 함수 분리 구조를 사용한다.
-// 참조: https://github.com/openssl/openssl/blob/master/crypto/aria/aria.c
+// Following OpenSSL's small-footprint implementation style, this uses
+// byte-level S-Boxes and a clearly separated substitution (SL) / diffusion (A) structure.
+// Reference: https://github.com/openssl/openssl/blob/master/crypto/aria/aria.c
 //       KS X 1213:2004
 // ============================================================================
 namespace {
 
 using u128 = AriaCipher::u128;
 
-// ── S-Box (바이트 단위, 총 1KB) ─────────────────────────────────────────────
+// ── S-Box (byte-level, total 1 KB) ──────────────────────────────────────────
 
 static const uint8_t sb1[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
@@ -93,7 +93,7 @@ static const uint8_t sb4[256] = {
     0x25,0x8a,0xb5,0xe7,0x42,0xb3,0xc7,0xea,0xf7,0x4c,0x11,0x33,0x03,0xa2,0xac,0x60
 };
 
-// ── 키 스케줄 상수 (c1, c2, c3) ─────────────────────────────────────────────
+// ── Key schedule constants (c1, c2, c3) ─────────────────────────────────────
 
 static const u128 c1 = {{
     0x51,0x7c,0xc1,0xb7, 0x27,0x22,0x0a,0x94,
@@ -110,7 +110,7 @@ static const u128 c3 = {{
     0x03,0x24,0x97,0x75, 0x04,0xe8,0xc9,0x0e
 }};
 
-// ── 128 비트 XOR ────────────────────────────────────────────────────────────
+// ── 128-bit XOR ─────────────────────────────────────────────────────────────
 
 inline void xor128(uint8_t* o, const uint8_t* x, const u128& y) {
     for (int i = 0; i < 16; ++i)
@@ -122,10 +122,10 @@ inline void xor128(u128& o, const u128& x, const u128& y) {
         o.c[i] = x.c[i] ^ y.c[i];
 }
 
-// ── 치환 함수 (Substitution Layer) ──────────────────────────────────────────
+// ── Substitution function (Substitution Layer) ──────────────────────────────
 //
-// SL1: sb1, sb2, sb3, sb4 순서 (홀수 라운드)
-// SL2: sb3, sb4, sb1, sb2 순서 (짝수 라운드)
+// SL1: order sb1, sb2, sb3, sb4 (odd rounds)
+// SL2: order sb3, sb4, sb1, sb2 (even rounds)
 
 inline void sl1(u128& o, const u128& x, const u128& rk) {
     for (int i = 0; i < 16; i += 4) {
@@ -145,9 +145,9 @@ inline void sl2(u128& o, const u128& x, const u128& rk) {
     }
 }
 
-// ── 확산 함수 (Diffusion Layer A) ───────────────────────────────────────────
+// ── Diffusion function (Diffusion Layer A) ──────────────────────────────────
 //
-// 16×16 이진 행렬에 의한 선형 변환. 각 출력 바이트는 입력 바이트 7개의 XOR.
+// Linear transform using a 16x16 binary matrix. Each output byte is the XOR of 7 input bytes.
 
 void diffA(u128& y, const u128& x) {
     y.c[ 0] = x.c[ 3] ^ x.c[ 4] ^ x.c[ 6] ^ x.c[ 8] ^ x.c[ 9] ^ x.c[13] ^ x.c[14];
@@ -168,10 +168,10 @@ void diffA(u128& y, const u128& x) {
     y.c[15] = x.c[ 1] ^ x.c[ 2] ^ x.c[ 4] ^ x.c[ 5] ^ x.c[ 8] ^ x.c[10] ^ x.c[15];
 }
 
-// ── 라운드 함수 FO / FE ─────────────────────────────────────────────────────
+// ── Round functions FO / FE ─────────────────────────────────────────────────
 //
-// FO (홀수 라운드): SL1 → A
-// FE (짝수 라운드): SL2 → A
+// FO (odd rounds): SL1 -> A
+// FE (even rounds): SL2 -> A
 
 inline void FO(u128& o, const u128& d, const u128& rk) {
     u128 t;
@@ -185,7 +185,7 @@ inline void FE(u128& o, const u128& d, const u128& rk) {
     diffA(o, t);
 }
 
-// ── 바이트 단위 회전 (n 비트 오른쪽 회전) ───────────────────────────────────
+// ── Byte-wise rotation (rotate right by n bits) ─────────────────────────────
 //
 // o = xorVal XOR (z >>> n)
 
@@ -208,7 +208,7 @@ inline void rot61l(u128& o, const u128& x, const u128& z) { rotnr(128 - 61, o, x
 inline void rot31l(u128& o, const u128& x, const u128& z) { rotnr(128 - 31, o, x, z); }
 inline void rot19l(u128& o, const u128& x, const u128& z) { rotnr(128 - 19, o, x, z); }
 
-// ── 키 스케줄링 ─────────────────────────────────────────────────────────────
+// ── Key scheduling ───────────────────────────────────────────────────────────
 
 void ariaSetEncryptKey(const uint8_t* userKey, int bits, AriaCipher::AriaKey& key) {
     const u128 *ck1, *ck2, *ck3;
@@ -269,41 +269,41 @@ void ariaSetEncryptKey(const uint8_t* userKey, int bits, AriaCipher::AriaKey& ke
     }
 }
 
-// ── 블록 암호화 ─────────────────────────────────────────────────────────────
+// ── Block encryption ────────────────────────────────────────────────────────
 
 void ariaEncryptBlock(const uint8_t* in, uint8_t* out,
                       int rounds, const u128* keys) {
     u128 p;
     std::memcpy(&p, in, 16);
 
-    // 홀수/짝수 라운드 교대 수행 (마지막 2 라운드 제외)
+    // Alternate odd/even rounds (excluding the final 2 rounds)
     for (int i = 0; i < rounds - 2; i += 2) {
         FO(p, p, keys[i]);
         FE(p, p, keys[i + 1]);
     }
 
-    // 마지막 홀수 라운드
+    // Final odd round
     FO(p, p, keys[rounds - 2]);
 
-    // 최종 라운드: SL2 + 키 XOR (확산 함수 A 없음)
+    // Final round: SL2 + key XOR (without diffusion function A)
     sl2(p, p, keys[rounds - 1]);
     xor128(out, p.c, keys[rounds]);
 }
 
-// ── CTR 카운터 증가 ─────────────────────────────────────────────────────────
+// ── CTR counter increment ───────────────────────────────────────────────────
 
 void incrementCounter(uint8_t* ctr) {
     for (int i = 15; i >= 0; --i) {
         if (++ctr[i] != 0) return;
     }
-    // 모든 바이트가 overflow → 카운터가 0 으로 wrap-around 됨 (all-zero)
+    // All bytes overflowed -> the counter wraps around to 0 (all-zero)
     std::memset(ctr, 0, 16);
 }
 
 } // namespace
 
 // ============================================================================
-// AriaCipher 공개 인터페이스
+// AriaCipher public interface
 // ============================================================================
 
 bool AriaCipher::setKey(const std::string& key) {
@@ -342,11 +342,11 @@ bool AriaCipher::decrypt(uint8_t* data, size_t size) const {
 }
 
 // ============================================================================
-// AriaCipher 내부 구현
+// AriaCipher internal implementation
 // ============================================================================
 
 void AriaCipher::initKey() {
-    // setKey() 에서 크기 검증을 마쳤으므로 16/24/32 중 하나이다.
+    // Size validation has already been completed in setKey(), so it is one of 16/24/32.
     int keyBits = static_cast<int>(key_.size()) * 8;
     std::memset(&encKey_, 0, sizeof(encKey_));
     ariaSetEncryptKey(key_.data(), keyBits, encKey_);

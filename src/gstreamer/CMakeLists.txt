@@ -1,10 +1,10 @@
-# client 역할(및 공통)에서 사용
+# Used by the client role (and shared code)
 target_sources(hailo_common PRIVATE
     NalDecoderPipeline.cpp
     NalDecoderPipeline.h
 )
 
-# server 전용 (VideoPipeline = 파일→프레임, H264Encoder = 프레임→NAL)
+# Server-only (VideoPipeline = file->frame, H264Encoder = frame->NAL)
 target_sources(hailo_server PRIVATE
     VideoPipeline.cpp
     VideoPipeline.h

@@ -6,11 +6,11 @@
 
 #include "client/ClientWindow.h"
 
-// server 역할 실행 함수. hailo_server 바이너리에서는 ServerRole.cpp 가
-// 강한(strong) 정의를 제공하여 ServerWindow 를 띄운다.
-// hailo_client 바이너리에서는 아래 약한(weak) 기본 구현이 링크되어,
-// role=server 요청 시 에러 메시지를 출력하고 종료한다.
-// (HailoRT 의존성을 client 빌드에서 제거하기 위한 분리)
+// Server-role entry function. In the hailo_server binary, ServerRole.cpp
+// provides a strong definition that opens ServerWindow.
+// In the hailo_client binary, the weak default implementation below is linked,
+// prints an error message on a role=server request, and exits.
+// (Separated to remove the HailoRT dependency from the client build.)
 __attribute__((weak))
 int runServerRole(QApplication& /*app*/,
                   const std::string& /*hef_path*/,
@@ -18,8 +18,8 @@ int runServerRole(QApplication& /*app*/,
                   int /*rtsp_port*/,
                   const std::string& /*rtsp_path*/,
                   bool /*rtp_tcp*/) {
-    std::cerr << "[GuiApp] 이 바이너리는 server 역할을 지원하지 않습니다 "
-                 "(hailo_client 빌드). hailo_server 를 사용하세요."
+    std::cerr << "[GuiApp] This binary does not support the server role "
+                 "(hailo_client build). Use hailo_server."
               << std::endl;
     return 1;
 }
@@ -39,13 +39,13 @@ int GuiApp::run(const std::string& role,
     }
 
     if (role == "client") {
-        // 클라이언트 모드: RTSP 수신/디코드를 담당.
+        // Client mode: handles RTSP receive/decode.
         ClientWindow window(server_ip, rtsp_port, rtsp_path, rtp_tcp);
         window.show();
         return this->app_.exec();
     }
 
-    std::cerr << "[GuiApp] 알 수 없는 role: " << role
-              << " (server 또는 client 여야 함)" << std::endl;
+    std::cerr << "[GuiApp] Unknown role: " << role
+              << " (must be server or client)" << std::endl;
     return 1;
 }

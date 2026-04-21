@@ -11,7 +11,7 @@
 #include <cstring>
 
 // ============================================================================
-// 생성자 / 소멸자
+// Constructor / destructor
 // ============================================================================
 NalDecoderPipeline::NalDecoderPipeline(QObject* parent) : QObject(parent) {}
 
@@ -20,11 +20,11 @@ NalDecoderPipeline::~NalDecoderPipeline() {
 }
 
 // ============================================================================
-// start — appsrc → h264parse → decoder → videoconvert → appsink
+// start - appsrc -> h264parse -> decoder -> videoconvert -> appsink
 // ============================================================================
 bool NalDecoderPipeline::start() {
     if (!initializeGStreamer()) {
-        qWarning() << "[NalDecoderPipeline] GStreamer 초기화 실패";
+        qWarning() << "[NalDecoderPipeline] GStreamer initialization failed";
         return false;
     }
 
@@ -39,7 +39,7 @@ bool NalDecoderPipeline::start() {
     GstElement* sink    = gst_element_factory_make("appsink",      "sink");
 
     if (!this->appsrc_ || !parse || !decoder || !convert || !capsflt || !sink) {
-        qWarning() << "[NalDecoderPipeline] 파이프라인 요소 생성 실패";
+        qWarning() << "[NalDecoderPipeline] Failed to create pipeline elements";
         if (!this->appsrc_) qWarning() << "  missing element: appsrc";
         if (!parse)         qWarning() << "  missing element: h264parse";
         if (!decoder)       qWarning() << "  missing element: avdec_h264";
@@ -57,7 +57,7 @@ bool NalDecoderPipeline::start() {
         return false;
     }
 
-    // appsrc 설정: byte-stream H.264 NAL 입력
+    // Configure appsrc: byte-stream H.264 NAL input
     GstCaps* srcCaps = gst_caps_from_string(
         "video/x-h264,stream-format=byte-stream,alignment=nal");
     g_object_set(this->appsrc_,
@@ -67,12 +67,12 @@ bool NalDecoderPipeline::start() {
                  nullptr);
     gst_caps_unref(srcCaps);
 
-    // capsfilter: RGB 출력 강제
+    // capsfilter: force RGB output
     GstCaps* sinkCaps = gst_caps_from_string("video/x-raw,format=RGB");
     g_object_set(capsflt, "caps", sinkCaps, nullptr);
     gst_caps_unref(sinkCaps);
 
-    // appsink 설정
+    // Configure appsink
     g_object_set(sink,
                  "emit-signals", FALSE,
                  "sync",         FALSE,
@@ -85,11 +85,11 @@ bool NalDecoderPipeline::start() {
         &NalDecoderPipeline::onNewSample);
     gst_app_sink_set_callbacks(GST_APP_SINK(sink), &callbacks, this, nullptr);
 
-    // 파이프라인 조립 + 링크
+    // Assemble and link the pipeline
     gst_bin_add_many(GST_BIN(this->pipeline_),
                      this->appsrc_, parse, decoder, convert, capsflt, sink, nullptr);
     if (!gst_element_link_many(this->appsrc_, parse, decoder, convert, capsflt, sink, nullptr)) {
-        qWarning() << "[NalDecoderPipeline] 요소 링크 실패";
+        qWarning() << "[NalDecoderPipeline] Failed to link elements";
         gst_element_set_state(this->pipeline_, GST_STATE_NULL);
         gst_object_unref(this->pipeline_);
         this->pipeline_ = nullptr;
@@ -99,7 +99,7 @@ bool NalDecoderPipeline::start() {
 
     if (gst_element_set_state(this->pipeline_, GST_STATE_PLAYING)
             == GST_STATE_CHANGE_FAILURE) {
-        qWarning() << "[NalDecoderPipeline] PLAYING 전환 실패";
+        qWarning() << "[NalDecoderPipeline] Failed to switch to PLAYING";
         gst_element_set_state(this->pipeline_, GST_STATE_NULL);
         gst_object_unref(this->pipeline_);
         this->pipeline_ = nullptr;
@@ -108,7 +108,7 @@ bool NalDecoderPipeline::start() {
     }
 
     this->running_.store(true);
-    qInfo() << "[NalDecoderPipeline] 디코딩 파이프라인 시작";
+    qInfo() << "[NalDecoderPipeline] Decoding pipeline started";
     return true;
 }
 
@@ -121,12 +121,12 @@ void NalDecoderPipeline::stop() {
         gst_element_set_state(this->pipeline_, GST_STATE_NULL);
         gst_object_unref(this->pipeline_);
         this->pipeline_ = nullptr;
-        this->appsrc_   = nullptr;  // bin 소유
+        this->appsrc_   = nullptr;  // Owned by the bin
     }
 }
 
 // ============================================================================
-// pushNal — raw NAL 에 Annex-B start code 를 붙여 appsrc 에 push
+// pushNal - prepend an Annex-B start code to a raw NAL and push it to appsrc
 // ============================================================================
 void NalDecoderPipeline::pushNal(const QByteArray& nal) {
     if (!this->running_.load() || nal.isEmpty()) return;
@@ -134,7 +134,7 @@ void NalDecoderPipeline::pushNal(const QByteArray& nal) {
     std::lock_guard<std::mutex> lock(this->srcMu_);
     if (!this->appsrc_) return;
 
-    // Annex-B start code (0x00000001) + NAL 본문
+    // Annex-B start code (0x00000001) + NAL body
     size_t totalSize = 4 + static_cast<size_t>(nal.size());
     GstBuffer* buf = gst_buffer_new_allocate(nullptr, totalSize, nullptr);
 
@@ -152,7 +152,7 @@ void NalDecoderPipeline::pushNal(const QByteArray& nal) {
 }
 
 // ============================================================================
-// onNewSample — 디코딩된 RGB 프레임 → frameReady emit
+// onNewSample - decoded RGB frame -> emit frameReady
 // ============================================================================
 int NalDecoderPipeline::onNewSample(GstAppSink* sink, void* userData) {
     auto* self = static_cast<NalDecoderPipeline*>(userData);

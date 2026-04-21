@@ -20,29 +20,29 @@
 #include "rtsp_native/MlKemHandshake.h"
 
 // ============================================================================
-// Session — 한 RTSP 클라이언트에 대한 세션 상태
+// Session - session state for one RTSP client
 // ============================================================================
 struct RtspServer::Session {
-    int              tcpFd     = -1;   // RTSP 제어 TCP 소켓
-    int              udpFd     = -1;   // RTP 송출 UDP 소켓 (UDP 모드 전용)
-    sockaddr_in      clientRtpAddr{};  // 클라이언트 RTP 수신 주소 (UDP 모드 전용)
+    int              tcpFd     = -1;   // RTSP control TCP socket
+    int              udpFd     = -1;   // RTP transmit UDP socket (UDP mode only)
+    sockaddr_in      clientRtpAddr{};  // Client RTP receive address (UDP mode only)
     std::string      id;               // Session ID
     uint16_t         seq       = 0;    // RTP sequence number
     uint32_t         ssrc      = 0;    // RTP SSRC
     bool             playing   = false;
-    bool             tcpTransport = false;  // TCP interleaved 전송 여부
-    uint8_t          rtpChannel   = 0;     // interleaved channel (보통 0)
-    std::mutex       writeMu;              // TCP 쓰기 직렬화 (RTSP 응답 + RTP 패킷)
+    bool             tcpTransport = false;  // Whether TCP interleaved transport is used
+    uint8_t          rtpChannel   = 0;     // Interleaved channel (usually 0)
+    std::mutex       writeMu;              // Serialize TCP writes (RTSP responses + RTP packets)
     std::atomic<bool> alive{true};
 
-    // ── ML-KEM 핸드셰이크에서 유도된 세션별 키 ───────────────────────
-    std::unique_ptr<ICipher> srtpCipher;      // SRTP 페이로드 암호화
-    std::unique_ptr<ICipher> rtspCipher;      // RTSP 제어 메시지 암호화
-    std::vector<uint8_t>     srtpAuthKey;     // SRTP HMAC-SHA1 인증 키
+    // ── Per-session keys derived from the ML-KEM handshake ─────────────
+    std::unique_ptr<ICipher> srtpCipher;      // SRTP payload encryption
+    std::unique_ptr<ICipher> rtspCipher;      // RTSP control-message encryption
+    std::vector<uint8_t>     srtpAuthKey;     // SRTP HMAC-SHA1 authentication key
 };
 
 // ============================================================================
-// 생성자 / 소멸자
+// Constructor / destructor
 // ============================================================================
 RtspServer::RtspServer(int port, std::string mountPoint,
                        int width, int height, int fps, bool rtpTcp)
@@ -54,14 +54,14 @@ RtspServer::~RtspServer() {
 }
 
 // ============================================================================
-// start — TCP 리스너 + accept 스레드
+// start - TCP listener + accept thread
 // ============================================================================
 bool RtspServer::start() {
     this->stop();
 
     this->listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (this->listenFd_ < 0) {
-        qWarning() << "[RtspServer] socket 실패:" << std::strerror(errno);
+        qWarning() << "[RtspServer] socket failed:" << std::strerror(errno);
         return false;
     }
 
@@ -74,13 +74,13 @@ bool RtspServer::start() {
     addr.sin_port        = htons(static_cast<uint16_t>(this->port_));
 
     if (::bind(this->listenFd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        qWarning() << "[RtspServer] bind 실패:" << std::strerror(errno);
+        qWarning() << "[RtspServer] bind failed:" << std::strerror(errno);
         ::close(this->listenFd_);
         this->listenFd_ = -1;
         return false;
     }
     if (::listen(this->listenFd_, 4) < 0) {
-        qWarning() << "[RtspServer] listen 실패:" << std::strerror(errno);
+        qWarning() << "[RtspServer] listen failed:" << std::strerror(errno);
         ::close(this->listenFd_);
         this->listenFd_ = -1;
         return false;
@@ -89,7 +89,7 @@ bool RtspServer::start() {
     this->running_.store(true);
     this->acceptThread_ = std::thread(&RtspServer::acceptLoop, this);
 
-    qInfo() << "[RtspServer] 시작: rtsp://<host>:" << this->port_
+    qInfo() << "[RtspServer] Started: rtsp://<host>:" << this->port_
             << this->mountPoint_.c_str()
             << " (" << this->width_ << "x" << this->height_
             << " @" << this->fps_ << "fps)";
@@ -131,14 +131,14 @@ void RtspServer::stop() {
 }
 
 // ============================================================================
-// acceptLoop — poll() 로 새 연결 대기
+// acceptLoop - wait for new connections using poll()
 // ============================================================================
 void RtspServer::acceptLoop() {
     while (this->running_.load()) {
         pollfd pfd{};
         pfd.fd     = this->listenFd_;
         pfd.events = POLLIN;
-        int ret = ::poll(&pfd, 1, 500);  // 500ms 주기로 종료 확인
+        int ret = ::poll(&pfd, 1, 500);  // Check for shutdown every 500 ms
         if (ret <= 0) continue;
 
         sockaddr_in clientAddr{};
@@ -150,7 +150,7 @@ void RtspServer::acceptLoop() {
         auto session = std::make_shared<Session>();
         session->tcpFd = fd;
 
-        // 랜덤 Session ID + SSRC 생성
+        // Generate a random Session ID + SSRC
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<uint32_t> dist;
@@ -167,17 +167,17 @@ void RtspServer::acceptLoop() {
 
         char ipBuf[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &clientAddr.sin_addr, ipBuf, sizeof(ipBuf));
-        qInfo() << "[RtspServer] 클라이언트 연결:" << ipBuf;
+        qInfo() << "[RtspServer] Client connected:" << ipBuf;
     }
 }
 
 // ============================================================================
-// performKemHandshake — ML-KEM 기반 키 교환 수행, 세션별 키 설정
+// performKemHandshake - perform ML-KEM-based key exchange and configure per-session keys
 // ============================================================================
 bool RtspServer::performKemHandshake(Session& s) {
     MlKemHandshake hs;
     if (!hs.performServerHandshake(s.tcpFd)) {
-        qWarning() << "[RtspServer] ML-KEM 핸드셰이크 실패 — 세션" << s.id.c_str();
+        qWarning() << "[RtspServer] ML-KEM handshake failed - session" << s.id.c_str();
         return false;
     }
 
@@ -185,13 +185,13 @@ bool RtspServer::performKemHandshake(Session& s) {
     s.rtspCipher  = hs.createRtspCipher();
     s.srtpAuthKey = hs.srtpAuthKey();
 
-    qInfo() << "[RtspServer] ML-KEM 핸드셰이크 완료 — 세션" << s.id.c_str();
+    qInfo() << "[RtspServer] ML-KEM handshake completed - session" << s.id.c_str();
     return true;
 }
 
 // ============================================================================
-// sendEncrypted — RTSP 메시지를 세션별 RTSP cipher 로 암호화하여 전송
-// 프레이밍: [4-byte network-order length][encrypted payload]
+// sendEncrypted - encrypt and send an RTSP message with the per-session RTSP cipher
+// Framing: [4-byte network-order length][encrypted payload]
 // ============================================================================
 bool RtspServer::sendEncrypted(Session& s, const std::string& data) {
     std::vector<uint8_t> buf(data.begin(), data.end());
@@ -209,7 +209,7 @@ bool RtspServer::sendEncrypted(Session& s, const std::string& data) {
     return true;
 }
 
-// TCP 세션 전용: writeMu 보호 하에 sendEncrypted 호출
+// TCP-session-only: call sendEncrypted while protected by writeMu
 bool RtspServer::sendEncryptedLocked(Session& s, const std::string& data) {
     if (s.tcpTransport) {
         std::lock_guard<std::mutex> lock(s.writeMu);
@@ -219,7 +219,7 @@ bool RtspServer::sendEncryptedLocked(Session& s, const std::string& data) {
 }
 
 // ============================================================================
-// recvEncrypted — 세션별 RTSP cipher 로 암호화된 메시지 수신 및 복호화
+// recvEncrypted - receive and decrypt a message encrypted with the per-session RTSP cipher
 // ============================================================================
 bool RtspServer::recvEncrypted(Session& s, std::string& data) {
     uint32_t netLen = 0;
@@ -248,10 +248,10 @@ bool RtspServer::recvEncrypted(Session& s, std::string& data) {
 }
 
 // ============================================================================
-// sessionLoop — RTSP 요청 수신 및 처리 (암호화 프레이밍)
+// sessionLoop - receive and handle RTSP requests (encrypted framing)
 // ============================================================================
 void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
-    // ── ML-KEM 핸드셰이크 (RTSP 시그널링 전에 수행) ─────────────────────
+    // ── ML-KEM handshake (performed before RTSP signaling) ───────────────────
     if (!this->performKemHandshake(*session)) {
         session->alive.store(false);
         if (session->tcpFd >= 0) { ::close(session->tcpFd); session->tcpFd = -1; }
@@ -278,10 +278,10 @@ void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
 }
 
 // ============================================================================
-// handleRequest — RTSP 메서드 분기
+// handleRequest - branch on RTSP methods
 // ============================================================================
 bool RtspServer::handleRequest(Session& s, const std::string& req) {
-    // CSeq 파싱
+    // Parse CSeq
     int cseq = 1;
     {
         size_t p = req.find("CSeq:");
@@ -295,13 +295,13 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
     if (req.compare(0, 7, "OPTIONS") == 0) {
         response = this->buildOptionsResponse(cseq);
     } else if (req.compare(0, 8, "DESCRIBE") == 0) {
-        // URI 파싱
+        // Parse the URI
         size_t sp = req.find(' ');
         size_t ep = req.find(' ', sp + 1);
         std::string uri = req.substr(sp + 1, ep - sp - 1);
         response = this->buildDescribeResponse(cseq, uri);
     } else if (req.compare(0, 5, "SETUP") == 0) {
-        // Transport 헤더 파싱
+        // Parse the Transport header
         std::string transport;
         size_t tp = req.find("Transport:");
         if (tp == std::string::npos) tp = req.find("transport:");
@@ -316,7 +316,7 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
         s.tcpTransport = isTcpTransport;
 
         if (isTcpTransport) {
-            // TCP interleaved: interleaved 채널 파싱
+            // TCP interleaved: parse the interleaved channel
             uint8_t ch = 0;
             size_t ip = transport.find("interleaved=");
             if (ip != std::string::npos) {
@@ -324,11 +324,11 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
             }
             s.rtpChannel = ch;
 
-            qInfo() << "[RtspServer] 세션" << s.id.c_str()
-                    << "RTP 전송: TCP interleaved (channel" << ch << ")";
+            qInfo() << "[RtspServer] Session" << s.id.c_str()
+                    << "RTP transport: TCP interleaved (channel" << ch << ")";
             response = this->buildSetupResponse(cseq, s.id, transport);
         } else {
-            // UDP: client_port 추출 후 UDP 소켓 바인드
+            // UDP: extract client_port, then bind the UDP socket
             uint16_t clientRtpPort = 0;
             size_t cp = transport.find("client_port=");
             if (cp != std::string::npos) {
@@ -354,8 +354,8 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
             ::getsockname(s.udpFd, reinterpret_cast<sockaddr*>(&localAddr), &localLen);
             uint16_t serverRtpPort = ntohs(localAddr.sin_port);
 
-            qInfo() << "[RtspServer] 세션" << s.id.c_str()
-                    << "RTP 전송: UDP (client_port=" << clientRtpPort
+            qInfo() << "[RtspServer] Session" << s.id.c_str()
+                    << "RTP transport: UDP (client_port=" << clientRtpPort
                     << ", server_port=" << serverRtpPort << ")";
             response = this->buildSetupResponse(cseq, s.id, transport +
                 ";server_port=" + std::to_string(serverRtpPort) + "-" +
@@ -367,7 +367,7 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
     } else if (req.compare(0, 8, "TEARDOWN") == 0) {
         response = this->buildTeardownResponse(cseq, s.id);
         this->sendEncryptedLocked(s, response);
-        return false;  // 세션 종료
+        return false;  // End the session
     } else {
         response = this->buildGenericOkResponse(cseq, s.id);
     }
@@ -376,7 +376,7 @@ bool RtspServer::handleRequest(Session& s, const std::string& req) {
 }
 
 // ============================================================================
-// 응답 빌더들
+// Response builders
 // ============================================================================
 std::string RtspServer::buildOptionsResponse(int cseq) {
     std::ostringstream oss;
@@ -436,7 +436,7 @@ std::string RtspServer::buildTeardownResponse(int cseq, const std::string& sessi
 }
 
 std::string RtspServer::buildGenericOkResponse(int cseq, const std::string& sessionId) {
-    return this->buildTeardownResponse(cseq, sessionId);  // 같은 포맷
+    return this->buildTeardownResponse(cseq, sessionId);  // Same format
 }
 
 std::string RtspServer::buildErrorResponse(int cseq, int code, const std::string& reason) {
@@ -447,7 +447,7 @@ std::string RtspServer::buildErrorResponse(int cseq, int code, const std::string
 }
 
 // ============================================================================
-// sendNal — 모든 PLAY 세션에 access unit 전송 (RTP 패킷화)
+// sendNal - send the access unit to all PLAY sessions (RTP packetization)
 // ============================================================================
 void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
     if (!this->running_.load() || nalSize == 0) return;
@@ -456,11 +456,11 @@ void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
         this->frameIndex_ * 90000 / static_cast<uint64_t>(this->fps_));
     ++this->frameIndex_;
 
-    // Annex-B byte-stream 에서 NAL 단위를 추출
+    // Extract NAL units from the Annex-B byte stream
     std::vector<std::pair<const uint8_t*, size_t>> nals;
     size_t i = 0;
     while (i < nalSize) {
-        // start code 찾기: 0x000001 또는 0x00000001
+        // Find the start code: 0x000001 or 0x00000001
         size_t scLen = 0;
         if (i + 3 <= nalSize && nalData[i] == 0 && nalData[i+1] == 0 && nalData[i+2] == 1) {
             scLen = 3;
@@ -473,7 +473,7 @@ void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
         }
 
         size_t nalStart = i + scLen;
-        // 다음 start code 또는 끝까지
+        // Up to the next start code or the end
         size_t nalEnd = nalSize;
         for (size_t j = nalStart; j + 3 <= nalSize; ++j) {
             if (nalData[j] == 0 && nalData[j+1] == 0 &&
@@ -502,7 +502,7 @@ void RtspServer::sendNal(const uint8_t* nalData, size_t nalSize) {
 }
 
 // ============================================================================
-// sendNalToSession — Single NAL 또는 FU-A 패킷화
+// sendNalToSession - packetize as Single NAL or FU-A
 // ============================================================================
 static constexpr size_t MAX_RTP_PAYLOAD = 1400;
 
@@ -546,9 +546,9 @@ void RtspServer::sendNalToSession(Session& s, uint32_t rtpTs,
 }
 
 // ============================================================================
-// sendRtpPacket — SRTP 패킷 생성: RTP 헤더 + 암호화 페이로드 + 인증 태그
+// sendRtpPacket - build an SRTP packet: RTP header + encrypted payload + authentication tag
 //
-// SRTP 패킷 구조 (RFC 3711):
+// SRTP packet structure (RFC 3711):
 //   [RTP Header (12B)] [Encrypted Payload] [Auth Tag (10B)]
 //
 // Auth Tag = truncate(HMAC-SHA1(auth_key, RTP Header || Encrypted Payload), 10)
@@ -571,21 +571,21 @@ void RtspServer::sendRtpPacket(Session& s, uint32_t rtpTs, bool marker,
     packet[10] = static_cast<uint8_t>((s.ssrc >> 8)  & 0xFF);
     packet[11] = static_cast<uint8_t>(s.ssrc & 0xFF);
 
-    // 페이로드 복사 후 세션별 SRTP cipher 로 암호화
+    // Copy the payload, then encrypt it with the session's SRTP cipher
     std::memcpy(packet + 12, payload, size);
     s.srtpCipher->encrypt(packet + 12, size);
     ++s.seq;
 
-    size_t rtpLen = 12 + size;  // RTP 헤더 + 암호화된 페이로드
+    size_t rtpLen = 12 + size;  // RTP header + encrypted payload
 
-    // HMAC-SHA1 인증 태그 생성: OpenSSL HMAC + 세션별 인증 키
+    // Create the HMAC-SHA1 authentication tag: OpenSSL HMAC + per-session authentication key
     unsigned int hmacLen = 0;
-    uint8_t hmacBuf[20];  // SHA1 = 20 바이트
+    uint8_t hmacBuf[20];  // SHA1 = 20 bytes
     HMAC(EVP_sha1(),
          s.srtpAuthKey.data(), static_cast<int>(s.srtpAuthKey.size()),
          packet, rtpLen,
          hmacBuf, &hmacLen);
-    // 80-bit 로 truncate 하여 패킷 끝에 추가
+    // Truncate to 80 bits and append it to the end of the packet
     std::memcpy(packet + rtpLen, hmacBuf, kSrtpAuthTagLen);
 
     size_t totalLen = rtpLen + kSrtpAuthTagLen;

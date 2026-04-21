@@ -1,4 +1,4 @@
-# 암복호화 모듈 — client/server 양쪽에서 사용
+# Encryption/decryption module used by both client and server
 target_sources(hailo_common PRIVATE
     ICipher.h
     AriaCipher.cpp

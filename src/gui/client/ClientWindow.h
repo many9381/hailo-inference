@@ -43,12 +43,12 @@ private:
     QLabel*       statusLabel_    = nullptr;
     QLabel*       videoLabel_     = nullptr;
 
-    // RTSP 연결 설정
+    // RTSP connection settings
     int         rtspPort_ = 8554;
     std::string rtspPath_ = "/stream";
     bool        rtpTcp_   = false;
 
-    // RTSP 수신 (native socket) + NAL 디코더 (GStreamer)
+    // RTSP receiver (native socket) + NAL decoder (GStreamer)
     RtspClient*         rtspClient_ = nullptr;
     NalDecoderPipeline* decoder_    = nullptr;
 };

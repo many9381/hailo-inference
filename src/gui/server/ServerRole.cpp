@@ -5,8 +5,8 @@
 
 #include "ServerWindow.h"
 
-// hailo_server 바이너리 전용: GuiApp.cpp 의 weak 기본 구현을 덮어쓰는
-// 강한(strong) 정의. ServerWindow 를 생성하여 server 역할을 수행한다.
+// hailo_server-binary-only: strong definition that overrides the weak default
+// implementation in GuiApp.cpp. Creates ServerWindow and performs the server role.
 int runServerRole(QApplication& app,
                   const std::string& hef_path,
                   const std::string& video_path,
