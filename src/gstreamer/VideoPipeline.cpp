@@ -17,23 +17,36 @@ bool VideoPipeline::start(const std::string& filepath) {
     // 이미 다른 영상이 재생 중이라면 안전하게 정리 후 재구성.
     this->stop();
 
-    // 파이프라인 정의: 파일을 디코드해 RGB 프레임을 appsink 큐에 1장만 유지(드롭 정책).
-    // max-buffers=1, drop=true로 추론이 느릴 때 latency를 낮춘다.
+    // 영상 소스 유형에 따라 파이프라인 앞단(source element)을 결정한다.
     //
-    // 데이터 흐름 (element 그래프):
+    //   1) /dev/video* (V4L2 디바이스): v4l2src 로 USB 웹캠 등 캡처
+    //   2) rtsp://     (RTSP URL):      rtspsrc 로 네트워크 영상 수신
+    //   3) 그 외       (파일 경로):      filesrc 로 로컬 파일 디코딩
     //
-    //   filesrc          -> decodebin       -> videoconvert    -> [caps: RGB]    -> appsink
-    //   (파일 바이트 읽기)   (컨테이너/코덱 디코딩)   (픽셀 포맷 변환)      (RGB 강제 필터)      (앱으로 전달)
-    //
-    //   * filesrc      : location 파일을 열어 raw 바이트 스트림 출력
-    //   * decodebin    : MP4/H.264 등 자동 감지 후 decoded video frame으로 변환
-    //   * videoconvert : 디코더 출력 포맷(YUV 등)을 다른 포맷으로 변환 가능하게 어댑팅
-    //   * caps filter  : 다음 단으로 흘릴 데이터 형식을 RGB로 강제(이 지점에서 포맷 확정)
-    //   * appsink      : 파이프라인 끝단. 우리 콜백(onNewSample)으로 프레임을 꺼내감
+    // 라이브 소스(V4L2, RTSP)는 sync=false 로 설정해 실시간 프레임을
+    // 지연 없이 처리하고, 파일 소스는 sync=true 로 원본 framerate 에 맞춘다.
+    std::string source;
+    bool is_live = false;
+
+    if (filepath.compare(0, 5, "/dev/") == 0) {
+        // V4L2 디바이스 (USB 웹캠 등)
+        source = "v4l2src device=\"" + filepath + "\" ! decodebin";
+        is_live = true;
+    } else if (filepath.compare(0, 7, "rtsp://") == 0 ||
+               filepath.compare(0, 8, "rtsps://") == 0) {
+        // RTSP 스트림 수신
+        source = "rtspsrc location=\"" + filepath + "\" latency=200 ! decodebin";
+        is_live = true;
+    } else {
+        // 로컬 비디오 파일
+        source = "filesrc location=\"" + filepath + "\" ! decodebin";
+    }
+
+    const std::string sync_val = is_live ? "false" : "true";
     const std::string desc =
-        "filesrc location=\"" + filepath + "\" ! "
-        "decodebin ! videoconvert ! video/x-raw,format=RGB ! "
-        "appsink name=sink emit-signals=false sync=true max-buffers=1 drop=true";
+        source + " ! videoconvert ! video/x-raw,format=RGB ! "
+        "appsink name=sink emit-signals=false sync=" + sync_val +
+        " max-buffers=1 drop=true";
 
     // desc 문자열을 파싱해 element 인스턴스화 + property 설정 + pad link까지
     // 한 번에 수행하고, 완성된 GstPipeline을 반환한다.

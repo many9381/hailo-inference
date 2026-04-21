@@ -35,7 +35,7 @@ public:
                           QWidget* parent = nullptr);
     ~ServerWindow() override;
 
-    // 비디오 파일 재생 시작
+    // 영상 소스 재생 시작 (파일 경로, /dev/video* 디바이스, rtsp:// URL)
     void playVideo(const QString& filepath);
 
 private slots:

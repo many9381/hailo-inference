@@ -22,7 +22,8 @@ public:
     VideoPipeline(const VideoPipeline&) = delete;
     VideoPipeline& operator=(const VideoPipeline&) = delete;
 
-    // 지정된 파일 경로로 파이프라인을 시작한다. 성공 시 true.
+    // 영상 소스로 파이프라인을 시작한다. 성공 시 true.
+    // filepath: 로컬 파일 경로, V4L2 디바이스(/dev/video*), 또는 RTSP URL(rtsp://)
     bool start(const std::string& filepath);
 
     // 파이프라인을 중지하고 모든 GStreamer 리소스를 해제한다.
