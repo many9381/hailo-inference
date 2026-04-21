@@ -19,7 +19,7 @@
 
 #include <openssl/hmac.h>
 
-#include "rtsp_native/TlsHandshake.h"
+#include "rtsp_native/MlKemHandshake.h"
 
 // ============================================================================
 // 생성자 / 소멸자
@@ -45,8 +45,8 @@ bool RtspClient::start(const std::string& url) {
 
     if (!this->openControl()) return false;
 
-    // TLS 1.3 핸드셰이크 — RTSP 시그널링 전에 키 교환 수행
-    if (!this->performTlsHandshake()) {
+    // ML-KEM 핸드셰이크 — RTSP 시그널링 전에 키 교환 수행
+    if (!this->performKemHandshake()) {
         ::close(this->controlFd_);
         this->controlFd_ = -1;
         return false;
@@ -105,7 +105,7 @@ void RtspClient::stop() {
     this->fuBuffer_.clear();
     this->fuInProgress_ = false;
 
-    // TLS 유도 키 초기화
+    // ML-KEM 유도 키 초기화
     this->srtpCipher_.reset();
     this->rtspCipher_.reset();
     this->srtpAuthKey_.clear();
@@ -179,20 +179,20 @@ bool RtspClient::openControl() {
 }
 
 // ============================================================================
-// performTlsHandshake — TLS 1.3 키 교환 수행, 클라이언트측 키 설정
+// performKemHandshake — ML-KEM 기반 키 교환 수행, 클라이언트측 키 설정
 // ============================================================================
-bool RtspClient::performTlsHandshake() {
-    TlsHandshake tls;
-    if (!tls.performClientHandshake(this->controlFd_)) {
-        qWarning() << "[RtspClient] TLS 핸드셰이크 실패";
+bool RtspClient::performKemHandshake() {
+    MlKemHandshake hs;
+    if (!hs.performClientHandshake(this->controlFd_)) {
+        qWarning() << "[RtspClient] ML-KEM 핸드셰이크 실패";
         return false;
     }
 
-    this->srtpCipher_ = tls.createSrtpCipher();
-    this->rtspCipher_ = tls.createRtspCipher();
-    this->srtpAuthKey_ = tls.srtpAuthKey();
+    this->srtpCipher_ = hs.createSrtpCipher();
+    this->rtspCipher_ = hs.createRtspCipher();
+    this->srtpAuthKey_ = hs.srtpAuthKey();
 
-    qInfo() << "[RtspClient] TLS 1.3 핸드셰이크 완료";
+    qInfo() << "[RtspClient] ML-KEM 핸드셰이크 완료";
     return true;
 }
 
@@ -233,7 +233,7 @@ bool RtspClient::bindRtpSocket() {
 // sendRequest — 한 개의 RTSP 요청을 보내고 응답을 한 메시지까지 수신
 // ============================================================================
 bool RtspClient::sendRequest(const std::string& req, std::string* response) {
-    // ── TLS 유도 RTSP cipher 로 암호화하여 길이 프리픽스와 함께 전송 ────
+    // ── ML-KEM 유도 RTSP cipher 로 암호화하여 길이 프리픽스와 함께 전송 ──
     std::vector<uint8_t> encBuf(req.begin(), req.end());
     this->rtspCipher_->encrypt(encBuf.data(), encBuf.size());
 

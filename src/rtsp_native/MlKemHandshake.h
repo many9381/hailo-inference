@@ -10,7 +10,7 @@
 #include "crypto/ICipher.h"
 
 // ----------------------------------------------------------------------------
-// TlsHandshake
+// MlKemHandshake
 //
 // ML-KEM-768 (FIPS 203) 기반 핸드셰이크 프로토콜의 키 교환 부분을 구현한다.
 // OpenSSL EVP API 를 통한 ML-KEM 키 캡슐화와 HKDF-SHA256 키 유도를 수행하여
@@ -36,16 +36,16 @@
 //       → srtp_key (16B), srtp_iv (16B), srtp_auth_key (20B), rtsp_key (16B), rtsp_iv (16B)
 //
 // 사용법 (서버측):
-//   TlsHandshake tls;
-//   if (!tls.performServerHandshake(fd)) { /* 실패 */ }
-//   auto srtpKey = tls.srtpKey();
+//   MlKemHandshake hs;
+//   if (!hs.performServerHandshake(fd)) { /* 실패 */ }
+//   auto srtpKey = hs.srtpKey();
 //
 // 사용법 (클라이언트측):
-//   TlsHandshake tls;
-//   if (!tls.performClientHandshake(fd)) { /* 실패 */ }
-//   auto srtpKey = tls.srtpKey();
+//   MlKemHandshake hs;
+//   if (!hs.performClientHandshake(fd)) { /* 실패 */ }
+//   auto srtpKey = hs.srtpKey();
 // ----------------------------------------------------------------------------
-class TlsHandshake {
+class MlKemHandshake {
 public:
     // ML-KEM-768 (FIPS 203) 파라미터
     static constexpr const char* kMlKemAlg          = "ML-KEM-768";
@@ -53,7 +53,7 @@ public:
     static constexpr size_t kMlKemCiphertextBytes   = 1088;
     static constexpr size_t kMlKemSharedSecretBytes = 32;
 
-    static constexpr uint16_t kTls13Version = 0x0304;
+    static constexpr uint16_t kHandshakeVersion = 0x0304;
     static constexpr uint8_t  kClientHello  = 1;
     static constexpr uint8_t  kServerHello  = 2;
     static constexpr size_t   kRandomSize   = 32;
@@ -66,7 +66,7 @@ public:
     static constexpr size_t kRtspKeySize    = 16;  // ARIA-128
     static constexpr size_t kRtspIvSize     = 16;
 
-    TlsHandshake() = default;
+    MlKemHandshake() = default;
 
     // TCP 소켓 fd 를 통해 서버측 핸드셰이크를 수행한다.
     // KEM 키 쌍 생성 → ServerHello 송신(pk) → ClientHello 수신(ct) → 역캡슐화 → 키 유도

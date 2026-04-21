@@ -13,7 +13,7 @@
 
 #include "crypto/AriaCipher.h"
 #include "crypto/ICipher.h"
-#include "rtsp_native/TlsHandshake.h"
+#include "rtsp_native/MlKemHandshake.h"
 
 // ----------------------------------------------------------------------------
 // RtspClient
@@ -54,7 +54,7 @@ private:
     // ── URL/시그널링 헬퍼 ────────────────────────────────────────────────
     bool parseUrl(const std::string& url);
     bool openControl();
-    bool performTlsHandshake();                     // TLS 1.3 키 교환
+    bool performKemHandshake();                     // ML-KEM 기반 키 교환
     bool bindRtpSocket();                           // 클라이언트 RTP UDP 포트 할당 (UDP 전용)
     bool sendRequest(const std::string& req,
                      std::string* response);        // 한 요청을 보내고 응답 수신
@@ -87,10 +87,10 @@ private:
     std::vector<uint8_t> fuBuffer_;
     bool                 fuInProgress_ = false;
 
-    // ── SRTP 복호화 + 인증 검증 (TLS 핸드셰이크에서 키 유도) ──────────
+    // ── SRTP 복호화 + 인증 검증 (ML-KEM 핸드셰이크에서 키 유도) ───────
     static constexpr size_t kSrtpAuthTagLen = 10;  // RFC 3711: 80-bit truncated HMAC-SHA1
 
-    std::unique_ptr<ICipher> srtpCipher_;     // TLS 유도 SRTP 암호화 키
-    std::unique_ptr<ICipher> rtspCipher_;     // TLS 유도 RTSP 제어 메시지 암호화 키
-    std::vector<uint8_t>     srtpAuthKey_;    // TLS 유도 SRTP 인증 키
+    std::unique_ptr<ICipher> srtpCipher_;     // ML-KEM 유도 SRTP 암호화 키
+    std::unique_ptr<ICipher> rtspCipher_;     // ML-KEM 유도 RTSP 제어 메시지 암호화 키
+    std::vector<uint8_t>     srtpAuthKey_;    // ML-KEM 유도 SRTP 인증 키
 };

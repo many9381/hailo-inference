@@ -17,7 +17,7 @@
 
 #include <openssl/hmac.h>
 
-#include "rtsp_native/TlsHandshake.h"
+#include "rtsp_native/MlKemHandshake.h"
 
 // ============================================================================
 // Session — 한 RTSP 클라이언트에 대한 세션 상태
@@ -35,7 +35,7 @@ struct RtspServer::Session {
     std::mutex       writeMu;              // TCP 쓰기 직렬화 (RTSP 응답 + RTP 패킷)
     std::atomic<bool> alive{true};
 
-    // ── TLS 에서 유도된 세션별 키 ─────────────────────────────────────
+    // ── ML-KEM 핸드셰이크에서 유도된 세션별 키 ───────────────────────
     std::unique_ptr<ICipher> srtpCipher;      // SRTP 페이로드 암호화
     std::unique_ptr<ICipher> rtspCipher;      // RTSP 제어 메시지 암호화
     std::vector<uint8_t>     srtpAuthKey;     // SRTP HMAC-SHA1 인증 키
@@ -172,20 +172,20 @@ void RtspServer::acceptLoop() {
 }
 
 // ============================================================================
-// performTlsHandshake — TLS 1.3 키 교환 수행, 세션별 키 설정
+// performKemHandshake — ML-KEM 기반 키 교환 수행, 세션별 키 설정
 // ============================================================================
-bool RtspServer::performTlsHandshake(Session& s) {
-    TlsHandshake tls;
-    if (!tls.performServerHandshake(s.tcpFd)) {
-        qWarning() << "[RtspServer] TLS 핸드셰이크 실패 — 세션" << s.id.c_str();
+bool RtspServer::performKemHandshake(Session& s) {
+    MlKemHandshake hs;
+    if (!hs.performServerHandshake(s.tcpFd)) {
+        qWarning() << "[RtspServer] ML-KEM 핸드셰이크 실패 — 세션" << s.id.c_str();
         return false;
     }
 
-    s.srtpCipher  = tls.createSrtpCipher();
-    s.rtspCipher  = tls.createRtspCipher();
-    s.srtpAuthKey = tls.srtpAuthKey();
+    s.srtpCipher  = hs.createSrtpCipher();
+    s.rtspCipher  = hs.createRtspCipher();
+    s.srtpAuthKey = hs.srtpAuthKey();
 
-    qInfo() << "[RtspServer] TLS 1.3 핸드셰이크 완료 — 세션" << s.id.c_str();
+    qInfo() << "[RtspServer] ML-KEM 핸드셰이크 완료 — 세션" << s.id.c_str();
     return true;
 }
 
@@ -251,8 +251,8 @@ bool RtspServer::recvEncrypted(Session& s, std::string& data) {
 // sessionLoop — RTSP 요청 수신 및 처리 (암호화 프레이밍)
 // ============================================================================
 void RtspServer::sessionLoop(std::shared_ptr<Session> session) {
-    // ── TLS 1.3 핸드셰이크 (RTSP 시그널링 전에 수행) ────────────────────
-    if (!this->performTlsHandshake(*session)) {
+    // ── ML-KEM 핸드셰이크 (RTSP 시그널링 전에 수행) ─────────────────────
+    if (!this->performKemHandshake(*session)) {
         session->alive.store(false);
         if (session->tcpFd >= 0) { ::close(session->tcpFd); session->tcpFd = -1; }
         return;

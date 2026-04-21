@@ -1,4 +1,4 @@
-#include "TlsHandshake.h"
+#include "MlKemHandshake.h"
 
 #include <sys/socket.h>
 #include <cstring>
@@ -15,7 +15,7 @@
 // 소켓 송수신 헬퍼
 // ============================================================================
 
-bool TlsHandshake::sendAll(int fd, const void* buf, size_t len) {
+bool MlKemHandshake::sendAll(int fd, const void* buf, size_t len) {
     const auto* p = static_cast<const uint8_t*>(buf);
     size_t sent = 0;
     while (sent < len) {
@@ -26,7 +26,7 @@ bool TlsHandshake::sendAll(int fd, const void* buf, size_t len) {
     return true;
 }
 
-bool TlsHandshake::recvAll(int fd, void* buf, size_t len) {
+bool MlKemHandshake::recvAll(int fd, void* buf, size_t len) {
     auto* p = static_cast<uint8_t*>(buf);
     size_t received = 0;
     while (received < len) {
@@ -41,22 +41,22 @@ bool TlsHandshake::recvAll(int fd, void* buf, size_t len) {
 // 핸드셰이크 메시지 송수신
 // ============================================================================
 
-bool TlsHandshake::sendHandshakeMsg(int fd, uint8_t msgType,
-                                     const uint8_t random[kRandomSize],
-                                     const uint8_t* payload, size_t payloadLen) {
+bool MlKemHandshake::sendHandshakeMsg(int fd, uint8_t msgType,
+                                      const uint8_t random[kRandomSize],
+                                      const uint8_t* payload, size_t payloadLen) {
     const size_t msgSize = kHeaderSize + payloadLen;
     std::vector<uint8_t> msg(msgSize);
     msg[0] = msgType;
-    msg[1] = static_cast<uint8_t>((kTls13Version >> 8) & 0xFF);
-    msg[2] = static_cast<uint8_t>(kTls13Version & 0xFF);
+    msg[1] = static_cast<uint8_t>((kHandshakeVersion >> 8) & 0xFF);
+    msg[2] = static_cast<uint8_t>(kHandshakeVersion & 0xFF);
     std::memcpy(msg.data() + 3, random, kRandomSize);
     std::memcpy(msg.data() + kHeaderSize, payload, payloadLen);
     return sendAll(fd, msg.data(), msgSize);
 }
 
-bool TlsHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
-                                     uint8_t random[kRandomSize],
-                                     uint8_t* payload, size_t payloadLen) {
+bool MlKemHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
+                                      uint8_t random[kRandomSize],
+                                      uint8_t* payload, size_t payloadLen) {
     const size_t msgSize = kHeaderSize + payloadLen;
     std::vector<uint8_t> msg(msgSize);
     if (!recvAll(fd, msg.data(), msgSize)) return false;
@@ -66,7 +66,7 @@ bool TlsHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
 
     // 버전 검증
     uint16_t version = (static_cast<uint16_t>(msg[1]) << 8) | msg[2];
-    if (version != kTls13Version) return false;
+    if (version != kHandshakeVersion) return false;
 
     std::memcpy(random, msg.data() + 3, kRandomSize);
     std::memcpy(payload, msg.data() + kHeaderSize, payloadLen);
@@ -78,20 +78,20 @@ bool TlsHandshake::recvHandshakeMsg(int fd, uint8_t expectedType,
 //
 // salt    = client_random || server_random  (64 바이트)
 // ikm     = shared_secret                  (32 바이트)
-// info    = "hailo-tls13-srtp-keys"
+// info    = "hailo-kem-srtp-keys"
 // output  = srtp_key(16) + srtp_iv(16) + srtp_auth_key(20) + rtsp_key(16) + rtsp_iv(16) = 84 바이트
 // ============================================================================
 
-bool TlsHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
-                               const uint8_t clientRandom[kRandomSize],
-                               const uint8_t serverRandom[kRandomSize]) {
+bool MlKemHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
+                                const uint8_t clientRandom[kRandomSize],
+                                const uint8_t serverRandom[kRandomSize]) {
     // salt = client_random || server_random
     std::vector<uint8_t> salt(kRandomSize * 2);
     std::memcpy(salt.data(), clientRandom, kRandomSize);
     std::memcpy(salt.data() + kRandomSize, serverRandom, kRandomSize);
 
     // info = 고정 라벨
-    const char* label = "hailo-tls13-srtp-keys";
+    const char* label = "hailo-kem-srtp-keys";
 
     // 총 필요한 키 재료: 16 + 16 + 20 + 16 + 16 = 84 바이트
     constexpr size_t totalKeyLen = kSrtpKeySize + kSrtpIvSize + kSrtpAuthKeySize
@@ -153,7 +153,7 @@ bool TlsHandshake::deriveKeys(const std::vector<uint8_t>& sharedSecret,
 // 5. 키 유도
 // ============================================================================
 
-bool TlsHandshake::performServerHandshake(int fd) {
+bool MlKemHandshake::performServerHandshake(int fd) {
     // 1. ML-KEM-768 키 쌍 생성
     EVP_PKEY* pkey = EVP_PKEY_Q_keygen(nullptr, nullptr, kMlKemAlg);
     if (!pkey) return false;
@@ -226,7 +226,7 @@ bool TlsHandshake::performServerHandshake(int fd) {
 // 4. 키 유도
 // ============================================================================
 
-bool TlsHandshake::performClientHandshake(int fd) {
+bool MlKemHandshake::performClientHandshake(int fd) {
     // 1. ServerHello 수신 (server_random + pk)
     uint8_t serverRandom[kRandomSize];
     std::vector<uint8_t> pk(kMlKemPublicKeyBytes);
@@ -279,7 +279,7 @@ bool TlsHandshake::performClientHandshake(int fd) {
 // Cipher 팩토리
 // ============================================================================
 
-std::unique_ptr<ICipher> TlsHandshake::createSrtpCipher() const {
+std::unique_ptr<ICipher> MlKemHandshake::createSrtpCipher() const {
     if (!complete_) return nullptr;
     auto c = std::make_unique<AriaCipher>();
     c->setKey(srtpKey_);
@@ -287,7 +287,7 @@ std::unique_ptr<ICipher> TlsHandshake::createSrtpCipher() const {
     return c;
 }
 
-std::unique_ptr<ICipher> TlsHandshake::createRtspCipher() const {
+std::unique_ptr<ICipher> MlKemHandshake::createRtspCipher() const {
     if (!complete_) return nullptr;
     auto c = std::make_unique<AriaCipher>();
     c->setKey(rtspKey_);

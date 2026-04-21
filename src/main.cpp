@@ -45,7 +45,7 @@ int main(int argc, char* argv[]) {
 
     if (role == "server" && video_path.empty()) {
         fs::path project_root = exe_dir.parent_path();
-        video_path = (project_root / "resource" / "VIRAT_S_000001.mp4").string();
+        video_path = (project_root / "resource" / "sample.mp4").string();
     }
 
     std::cout << "[main] role=" << role

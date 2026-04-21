@@ -12,7 +12,7 @@
 
 #include "crypto/AriaCipher.h"
 #include "crypto/ICipher.h"
-#include "rtsp_native/TlsHandshake.h"
+#include "rtsp_native/MlKemHandshake.h"
 
 // ----------------------------------------------------------------------------
 // RtspServer
@@ -87,8 +87,8 @@ private:
     std::string buildGenericOkResponse(int cseq, const std::string& sessionId);
     std::string buildErrorResponse(int cseq, int code, const std::string& reason);
 
-    // ── TLS 핸드셰이크 ──────────────────��─────────────────────────────────
-    bool performTlsHandshake(Session& s);
+    // ── ML-KEM 핸드셰이크 ───────────────────────────────────────────────
+    bool performKemHandshake(Session& s);
 
     // ── RTSP 암호화 송수신 헬퍼 ─────────────────────────────────────────
     // [4-byte network-order length][encrypted payload] 프레이밍으로 송수신.
