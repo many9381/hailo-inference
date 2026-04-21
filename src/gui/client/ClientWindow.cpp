@@ -55,7 +55,7 @@ ClientWindow::ClientWindow(const std::string& serverIp,
     this->videoLabel_->setText("서버에 연결되지 않음");
 
     this->mainLayout_->addLayout(this->controlLayout_);
-    this->mainLayout_->addWidget(this->videoLabel_);
+    this->mainLayout_->addWidget(this->videoLabel_, 1);
     this->setCentralWidget(this->central_);
 
     // ── NAL 디코더 (Qt parent-child → 소멸 시 자동 정리) ──
